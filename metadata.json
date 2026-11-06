@@ -1,0 +1,6 @@
+{
+  "name": "SIMPEL MI AL IHSAN",
+  "description": "Sistem Informasi Manajemen Pembelajaran untuk MI Ma’arif Al Ihsan Soborejo dengan Kurikulum Merdeka, Kurikulum Berbasis Cinta, dan Pembelajaran Mendalam.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

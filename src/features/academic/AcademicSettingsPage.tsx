@@ -1,0 +1,409 @@
+import React, { useState, useEffect } from 'react';
+import { academicService } from '../../services/academicService';
+import { AcademicYear, Semester, SystemSettings } from '../../types/database.types';
+import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School } from 'lucide-react';
+
+export const AcademicSettingsPage: React.FC = () => {
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
+  const [semesters, setSemesters] = useState<Semester[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Form input untuk Tahun Ajaran Baru
+  const [showAddYearModal, setShowAddYearModal] = useState<boolean>(false);
+  const [newYearName, setNewYearName] = useState<string>('2027/2028');
+  const [newYearStart, setNewYearStart] = useState<string>('2027-07-15');
+  const [newYearEnd, setNewYearEnd] = useState<string>('2028-06-25');
+
+  const loadData = async () => {
+    setIsLoading(true);
+    try {
+      const [sets, years, sems] = await Promise.all([
+        academicService.getSettings(),
+        academicService.getAcademicYears(),
+        academicService.getSemesters(),
+      ]);
+      setSettings(sets);
+      setAcademicYears(years);
+      setSemesters(sems);
+    } catch (err) {
+      console.error('Error loading academic data:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const handleSaveSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!settings) return;
+    setIsSaving(true);
+    setStatusMessage(null);
+    try {
+      const updated = await academicService.updateSettings(settings);
+      setSettings(updated);
+      setStatusMessage('Pengaturan madrasah berhasil disimpan.');
+      setTimeout(() => setStatusMessage(null), 3000);
+    } catch (err) {
+      console.error('Gagal menyimpan pengaturan:', err);
+      setStatusMessage('Terjadi kesalahan saat menyimpan pengaturan.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleAddYear = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await academicService.createAcademicYear({
+        name: newYearName,
+        start_date: newYearStart,
+        end_date: newYearEnd,
+        is_active: false,
+      });
+      setShowAddYearModal(false);
+      loadData();
+    } catch (err) {
+      console.error('Gagal menambah tahun pelajaran:', err);
+    }
+  };
+
+  const handleActivateYear = async (yearId: string) => {
+    if (!settings) return;
+    try {
+      await academicService.updateSettings({ active_academic_year_id: yearId });
+      loadData();
+    } catch (err) {
+      console.error('Gagal mengaktifkan tahun pelajaran:', err);
+    }
+  };
+
+  const handleActivateSemester = async (semesterId: string) => {
+    if (!settings) return;
+    try {
+      await academicService.updateSettings({ active_semester_id: semesterId });
+      loadData();
+    } catch (err) {
+      console.error('Gagal mengaktifkan semester:', err);
+    }
+  };
+
+  if (isLoading || !settings) {
+    return (
+      <div className="flex items-center justify-center p-12 text-slate-500">
+        <div className="w-8 h-8 border-2 border-emerald-800 border-t-transparent rounded-full animate-spin mr-3" />
+        <span>Memuat pengaturan akademik...</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-8 max-w-5xl">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-bold text-slate-900 tracking-tight">Pengaturan Akademik & Periode Aktif</h1>
+          <p className="text-xs text-slate-500 mt-1">
+            Konfigurasi identitas madrasah, penetapan tahun pelajaran berjalan, semester, dan nilai KKTP default.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-emerald-800 font-medium bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200">
+          <Database className="w-4 h-4 text-emerald-700" />
+          <span>Tersinkronisasi dengan Database PostgreSQL</span>
+        </div>
+      </div>
+
+      {statusMessage && (
+        <div className="flex items-center gap-2 p-3 text-xs font-medium text-emerald-800 bg-emerald-50 rounded-lg border border-emerald-200">
+          <CheckCircle className="w-4 h-4 shrink-0 text-emerald-600" />
+          <span>{statusMessage}</span>
+        </div>
+      )}
+
+      {/* Grid 2 Kolom: Identitas Madrasah & Periode Berjalan */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Kolom 1 & 2: Form Pengaturan Pokok */}
+        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-xs p-6">
+          <div className="flex items-center gap-2 pb-4 mb-6 border-b border-slate-100">
+            <School className="w-5 h-5 text-emerald-800" />
+            <h2 className="text-sm font-bold text-slate-900">Identitas & Kebijakan Kurikulum Madrasah</h2>
+          </div>
+
+          <form onSubmit={handleSaveSettings} className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Madrasah</label>
+                <input
+                  type="text"
+                  value={settings.school_name}
+                  onChange={(e) => setSettings({ ...settings, school_name: e.target.value })}
+                  className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 font-medium text-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">NSM (Nomor Statistik Madrasah)</label>
+                <input
+                  type="text"
+                  value={settings.nsm}
+                  onChange={(e) => setSettings({ ...settings, nsm: e.target.value })}
+                  className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">NPSN</label>
+                <input
+                  type="text"
+                  value={settings.npsn}
+                  onChange={(e) => setSettings({ ...settings, npsn: e.target.value })}
+                  className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">KKTP Default Madrasah (Skala 0-100)</label>
+                <input
+                  type="number"
+                  min="50"
+                  max="100"
+                  value={settings.kktp_default}
+                  onChange={(e) => setSettings({ ...settings, kktp_default: Number(e.target.value) })}
+                  className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Kepala Madrasah</label>
+                <input
+                  type="text"
+                  value={settings.principal_name}
+                  onChange={(e) => setSettings({ ...settings, principal_name: e.target.value })}
+                  className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">NIP Kepala Madrasah</label>
+                <input
+                  type="text"
+                  value={settings.principal_nip}
+                  onChange={(e) => setSettings({ ...settings, principal_nip: e.target.value })}
+                  className="w-full text-xs font-mono tabular-nums px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
+                  required
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Alamat Lengkap Madrasah</label>
+              <textarea
+                rows={2}
+                value={settings.address}
+                onChange={(e) => setSettings({ ...settings, address: e.target.value })}
+                className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 text-slate-900"
+                required
+              />
+            </div>
+
+            <div className="pt-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.is_report_card_locked}
+                  onChange={(e) => setSettings({ ...settings, is_report_card_locked: e.target.checked })}
+                  className="w-4 h-4 text-emerald-700 rounded border-slate-300 focus:ring-emerald-500"
+                />
+                <span className="text-xs font-medium text-slate-800">
+                  Kunci Perubahan Nilai Rapor (Hanya dapat diubah setelah persetujuan Kepala Madrasah)
+                </span>
+              </label>
+            </div>
+
+            <div className="flex justify-end pt-4 border-t border-slate-100">
+              <button
+                type="submit"
+                disabled={isSaving}
+                className="flex items-center gap-1.5 px-4 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-lg transition-colors shadow-xs disabled:opacity-50"
+              >
+                <Save className="w-4 h-4" />
+                <span>{isSaving ? 'Menyimpan...' : 'Simpan Perubahan'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+
+        {/* Kolom 3: Status Periode Aktif & Kontrol Cepat */}
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-6">
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-5 h-5 text-emerald-800" />
+                <h3 className="text-sm font-bold text-slate-900">Tahun Pelajaran</h3>
+              </div>
+              <button
+                onClick={() => setShowAddYearModal(true)}
+                className="p-1 text-emerald-800 hover:bg-emerald-50 rounded transition-colors"
+                title="Tambah Tahun Pelajaran"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {academicYears.map((ay) => {
+                const isActive = settings.active_academic_year_id === ay.id;
+                return (
+                  <div
+                    key={ay.id}
+                    className={`flex items-center justify-between p-3 rounded-lg border text-xs ${
+                      isActive
+                        ? 'border-emerald-300 bg-emerald-50/60 font-semibold text-emerald-900'
+                        : 'border-slate-100 bg-slate-50 text-slate-700'
+                    }`}
+                  >
+                    <div>
+                      <p className="font-bold">{ay.name}</p>
+                      <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                        {ay.start_date} s.d. {ay.end_date}
+                      </p>
+                    </div>
+                    {isActive ? (
+                      <span className="text-[10px] bg-emerald-800 text-white font-bold px-2 py-0.5 rounded">
+                        Aktif
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleActivateYear(ay.id)}
+                        className="text-[11px] text-slate-600 hover:text-emerald-800 font-medium underline"
+                      >
+                        Aktifkan
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-6">
+            <div className="flex items-center gap-2 pb-3 mb-4 border-b border-slate-100">
+              <ShieldCheck className="w-5 h-5 text-emerald-800" />
+              <h3 className="text-sm font-bold text-slate-900">Semester Berjalan</h3>
+            </div>
+
+            <div className="space-y-2">
+              {semesters.map((sem) => {
+                const isActive = settings.active_semester_id === sem.id;
+                return (
+                  <div
+                    key={sem.id}
+                    className={`flex items-center justify-between p-3 rounded-lg border text-xs ${
+                      isActive
+                        ? 'border-emerald-300 bg-emerald-50/60 font-semibold text-emerald-900'
+                        : 'border-slate-100 bg-slate-50 text-slate-700'
+                    }`}
+                  >
+                    <div>
+                      <p className="font-bold">Semester {sem.semester_type}</p>
+                      <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                        {sem.start_date} s.d. {sem.end_date}
+                      </p>
+                    </div>
+                    {isActive ? (
+                      <span className="text-[10px] bg-emerald-800 text-white font-bold px-2 py-0.5 rounded">
+                        Berjalan
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleActivateSemester(sem.id)}
+                        className="text-[11px] text-slate-600 hover:text-emerald-800 font-medium underline"
+                      >
+                        Pilih
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Modal Tambah Tahun Ajaran */}
+      {showAddYearModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-xl border border-slate-200">
+            <h3 className="text-base font-bold text-slate-900 mb-1">Tambah Tahun Pelajaran Baru</h3>
+            <p className="text-xs text-slate-500 mb-4">
+              Daftarkan periode tahun ajaran baru untuk perencanaan rombel dan KBM masa depan.
+            </p>
+
+            <form onSubmit={handleAddYear} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Format Nama Tahun</label>
+                <input
+                  type="text"
+                  placeholder="Contoh: 2027/2028"
+                  value={newYearName}
+                  onChange={(e) => setNewYearName(e.target.value)}
+                  className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tanggal Mulai</label>
+                  <input
+                    type="date"
+                    value={newYearStart}
+                    onChange={(e) => setNewYearStart(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 font-mono tabular-nums"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tanggal Berakhir</label>
+                  <input
+                    type="date"
+                    value={newYearEnd}
+                    onChange={(e) => setNewYearEnd(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 font-mono tabular-nums"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowAddYearModal(false)}
+                  className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg font-medium"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs"
+                >
+                  Tambah Tahun Ajaran
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
