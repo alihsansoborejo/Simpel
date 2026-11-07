@@ -61,7 +61,11 @@ export const UserManagementPage: React.FC = () => {
       setUsers(userList);
       setTeachersWithoutAccount(teachers);
     } catch (err: any) {
-      console.error('Error fetching users:', err);
+      console.warn('Recovering users list:', err);
+      try {
+        const fallbackList = await fetchUsersList();
+        setUsers(fallbackList);
+      } catch {}
     } finally {
       setIsLoading(false);
     }

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
 import { AcademicYear, Semester, SystemSettings } from '../../types/database.types';
-import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School } from 'lucide-react';
+import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School, Copy, Download, ExternalLink, Terminal, CheckCircle2 } from 'lucide-react';
 
 export const AcademicSettingsPage: React.FC = () => {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
@@ -16,6 +16,21 @@ export const AcademicSettingsPage: React.FC = () => {
   const [newYearName, setNewYearName] = useState<string>('2027/2028');
   const [newYearStart, setNewYearStart] = useState<string>('2027-07-15');
   const [newYearEnd, setNewYearEnd] = useState<string>('2028-06-25');
+  const [isCopied, setIsCopied] = useState<boolean>(false);
+
+  const handleCopySql = async () => {
+    try {
+      const res = await fetch('/full_migration_all_in_one.sql');
+      const text = await res.text();
+      await navigator.clipboard.writeText(text);
+      setIsCopied(true);
+      setStatusMessage('Skrip SQL migrasi (Tahap 2) berhasil disalin! Buka Supabase SQL Editor dan tekan Paste (Ctrl+V) lalu Run.');
+      setTimeout(() => setIsCopied(false), 4000);
+      setTimeout(() => setStatusMessage(null), 6000);
+    } catch (err) {
+      console.error('Gagal menyalin SQL:', err);
+    }
+  };
 
   const loadData = async () => {
     setIsLoading(true);
@@ -335,6 +350,64 @@ export const AcademicSettingsPage: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+          </div>
+
+          {/* Card Status Supabase & Skrip Migrasi SQL */}
+          <div className="bg-gradient-to-br from-emerald-950 via-slate-900 to-slate-950 text-white rounded-xl border border-emerald-800/60 shadow-md p-5 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-emerald-800/60">
+              <div className="flex items-center gap-2">
+                <Database className="w-5 h-5 text-amber-400" />
+                <h3 className="text-sm font-bold text-white">Database Supabase Madrasah</h3>
+              </div>
+              <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                Terhubung (Connected)
+              </span>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div className="p-2.5 rounded-lg bg-white/5 border border-white/10 space-y-1">
+                <span className="text-[10px] text-emerald-300 uppercase font-semibold block">Endpoint API Project:</span>
+                <span className="font-mono text-[11px] text-slate-200 block truncate">
+                  https://pwdhltrxdijsmmrsuheb.supabase.co
+                </span>
+              </div>
+
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                Skrip migrasi database lengkap (42 tabel, RLS, trigger, fungsi, dan seed data Tahap 2) telah siap. Jalankan sekali pada Supabase SQL Editor untuk mengaktifkan seluruh fitur.
+              </p>
+            </div>
+
+            <div className="space-y-2 pt-1">
+              <button
+                type="button"
+                onClick={handleCopySql}
+                className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold transition-colors shadow-xs"
+              >
+                {isCopied ? <CheckCircle2 className="w-4 h-4 text-amber-300" /> : <Copy className="w-4 h-4" />}
+                <span>{isCopied ? 'Tersalin ke Clipboard!' : 'Salin Skrip SQL Lengkap (1-Klik)'}</span>
+              </button>
+
+              <div className="grid grid-cols-2 gap-2">
+                <a
+                  href="/full_migration_all_in_one.sql"
+                  download="full_migration_all_in_one.sql"
+                  className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[11px] font-semibold border border-white/15 transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Unduh .sql</span>
+                </a>
+
+                <a
+                  href="https://supabase.com/dashboard/project/pwdhltrxdijsmmrsuheb/sql/new"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-bold transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Buka SQL Editor</span>
+                </a>
+              </div>
             </div>
           </div>
         </div>

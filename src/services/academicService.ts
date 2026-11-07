@@ -346,6 +346,119 @@ export const academicService = {
     return newAssignment;
   },
 
+  async upsertTeachingAssignment(
+    classId: string,
+    subjectId: string,
+    teacherId: string,
+    academicYearId: string = 'ay-2026',
+    semesterId: string = 'sem-ganjil-2026'
+  ): Promise<TeachingAssignment | null> {
+    const teachers = await this.getTeachers();
+    const classes = await this.getClasses();
+    const subjects = await this.getSubjects();
+    const current = await this.getTeachingAssignments();
+
+    // Jika dikosongkan ('unassigned' atau '')
+    if (!teacherId || teacherId === 'unassigned') {
+      const filtered = current.filter(
+        (a) => !(a.class_id === classId && a.subject_id === subjectId)
+      );
+      setLocal(STORAGE_KEYS.ASSIGNMENTS, filtered);
+      if (isSupabaseConfigured) {
+        try {
+          await supabase
+            .from('teaching_assignments')
+            .delete()
+            .match({ class_id: classId, subject_id: subjectId, academic_year_id: academicYearId, semester_id: semesterId });
+        } catch (e) {
+          console.warn('Supabase delete assignment error:', e);
+        }
+      }
+      return null;
+    }
+
+    const teacher = teachers.find((t) => t.id === teacherId);
+    const cls = classes.find((c) => c.id === classId);
+    const subject = subjects.find((s) => s.id === subjectId);
+
+    const existingIndex = current.findIndex(
+      (a) => a.class_id === classId && a.subject_id === subjectId
+    );
+
+    let result: TeachingAssignment;
+
+    if (existingIndex >= 0) {
+      current[existingIndex] = {
+        ...current[existingIndex],
+        teacher_id: teacherId,
+        teacher: teacher || current[existingIndex].teacher,
+        class: cls || current[existingIndex].class,
+        subject: subject || current[existingIndex].subject,
+      };
+      result = current[existingIndex];
+      setLocal(STORAGE_KEYS.ASSIGNMENTS, [...current]);
+
+      if (isSupabaseConfigured) {
+        try {
+          await supabase
+            .from('teaching_assignments')
+            .update({ teacher_id: teacherId })
+            .eq('id', result.id);
+        } catch (e) {
+          console.warn('Supabase update assignment error:', e);
+        }
+      }
+    } else {
+      result = {
+        id: `asg-${classId}-${subjectId}`,
+        class_id: classId,
+        subject_id: subjectId,
+        teacher_id: teacherId,
+        academic_year_id: academicYearId,
+        semester_id: semesterId,
+        created_at: new Date().toISOString(),
+        teacher,
+        class: cls,
+        subject,
+      };
+      const updated = [result, ...current];
+      setLocal(STORAGE_KEYS.ASSIGNMENTS, updated);
+
+      if (isSupabaseConfigured) {
+        try {
+          await supabase.from('teaching_assignments').insert({
+            class_id: classId,
+            subject_id: subjectId,
+            teacher_id: teacherId,
+            academic_year_id: academicYearId,
+            semester_id: semesterId,
+          });
+        } catch (e) {
+          console.warn('Supabase insert assignment error:', e);
+        }
+      }
+    }
+
+    return result;
+  },
+
+  async batchAssignClassTeachers(
+    classId: string,
+    assignmentsList: { subject_id: string; teacher_id: string }[],
+    academicYearId: string = 'ay-2026',
+    semesterId: string = 'sem-ganjil-2026'
+  ): Promise<void> {
+    for (const item of assignmentsList) {
+      await this.upsertTeachingAssignment(
+        classId,
+        item.subject_id,
+        item.teacher_id,
+        academicYearId,
+        semesterId
+      );
+    }
+  },
+
   // === ANGGOTA KELAS (ROMBEL SISWA) ===
   async getClassMembers(classId?: string): Promise<ClassMember[]> {
     if (isSupabaseConfigured) {

@@ -27,24 +27,52 @@ export interface CreateUserData {
   teacher_id?: string;
 }
 
-// In-memory state for local demo persistence
-let demoUsersState: UserListItem[] = DEMO_USERS.map((du) => ({
-  id: du.id,
-  email: du.profile.email,
-  full_name: du.profile.full_name,
-  phone_number: du.profile.phone_number,
-  avatar_url: du.profile.avatar_url,
-  is_active: du.profile.is_active,
-  created_at: du.profile.created_at,
-  roles: du.roles,
-  teacher_info: du.teacherId
-    ? {
-        id: du.teacherId,
-        nip: DEMO_TEACHERS.find((t) => t.id === du.teacherId)?.nip || null,
-        specialization: DEMO_TEACHERS.find((t) => t.id === du.teacherId)?.specialization || null,
-      }
-    : null,
-}));
+// Local persistence storage key for demo users
+const USERS_STORAGE_KEY = 'simpel_users_cache_v2';
+
+function getDemoUsers(): UserListItem[] {
+  try {
+    const raw = localStorage.getItem(USERS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {
+    console.warn('Error reading stored users:', e);
+  }
+
+  const initial: UserListItem[] = DEMO_USERS.map((du) => ({
+    id: du.id,
+    email: du.profile.email,
+    full_name: du.profile.full_name,
+    phone_number: du.profile.phone_number,
+    avatar_url: du.profile.avatar_url,
+    is_active: du.profile.is_active,
+    created_at: du.profile.created_at,
+    roles: du.roles,
+    teacher_info: du.teacherId
+      ? {
+          id: du.teacherId,
+          nip: DEMO_TEACHERS.find((t) => t.id === du.teacherId)?.nip || null,
+          specialization: DEMO_TEACHERS.find((t) => t.id === du.teacherId)?.specialization || null,
+        }
+      : null,
+  }));
+
+  try {
+    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(initial));
+  } catch {}
+
+  return initial;
+}
+
+function saveDemoUsers(users: UserListItem[]) {
+  try {
+    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+  } catch (e) {
+    console.warn('Error saving stored users:', e);
+  }
+}
 
 export async function fetchUsersList(filters?: {
   search?: string;
@@ -52,55 +80,61 @@ export async function fetchUsersList(filters?: {
   status?: string;
 }): Promise<UserListItem[]> {
   if (isSupabaseConfigured) {
-    let query = supabase
-      .from('profiles')
-      .select(`
-        id, email, full_name, phone_number, avatar_url, is_active, created_at,
-        user_roles (role),
-        teachers (id, nip, specialization)
-      `)
-      .order('created_at', { ascending: false });
+    try {
+      let query = supabase
+        .from('profiles')
+        .select(`
+          id, email, full_name, phone_number, avatar_url, is_active, created_at,
+          user_roles (role),
+          teachers (id, nip, specialization)
+        `)
+        .order('created_at', { ascending: false });
 
-    if (filters?.search) {
-      query = query.or(`full_name.ilike.%${filters.search}%,email.ilike.%${filters.search}%`);
+      if (filters?.search) {
+        query = query.or(`full_name.ilike.%${filters.search}%,email.ilike.%${filters.search}%`);
+      }
+
+      if (filters?.status === 'active') {
+        query = query.eq('is_active', true);
+      } else if (filters?.status === 'inactive') {
+        query = query.eq('is_active', false);
+      }
+
+      const { data, error } = await query;
+      if (!error && data && data.length > 0) {
+        const items: UserListItem[] = data.map((row: any) => {
+          const roles: UserRole[] = (row.user_roles || []).map((r: any) => r.role);
+          const teacher = Array.isArray(row.teachers) ? row.teachers[0] : row.teachers;
+          return {
+            id: row.id,
+            email: row.email,
+            full_name: row.full_name,
+            phone_number: row.phone_number,
+            avatar_url: row.avatar_url,
+            is_active: row.is_active,
+            created_at: row.created_at,
+            roles,
+            teacher_info: teacher ? { id: teacher.id, nip: teacher.nip, specialization: teacher.specialization } : null,
+          };
+        });
+
+        if (filters?.role) {
+          return items.filter((u) => u.roles.includes(filters.role as UserRole));
+        }
+
+        return items;
+      }
+
+      if (error) {
+        console.warn('Supabase fetchUsersList fallback to local demo store:', error.message);
+      }
+    } catch (err) {
+      console.warn('Supabase query error, fallback to local store:', err);
     }
-
-    if (filters?.status === 'active') {
-      query = query.eq('is_active', true);
-    } else if (filters?.status === 'inactive') {
-      query = query.eq('is_active', false);
-    }
-
-    const { data, error } = await query;
-    if (error) {
-      throw new Error(`Gagal memuat daftar pengguna: ${error.message}`);
-    }
-
-    const items: UserListItem[] = (data || []).map((row: any) => {
-      const roles: UserRole[] = (row.user_roles || []).map((r: any) => r.role);
-      const teacher = Array.isArray(row.teachers) ? row.teachers[0] : row.teachers;
-      return {
-        id: row.id,
-        email: row.email,
-        full_name: row.full_name,
-        phone_number: row.phone_number,
-        avatar_url: row.avatar_url,
-        is_active: row.is_active,
-        created_at: row.created_at,
-        roles,
-        teacher_info: teacher ? { id: teacher.id, nip: teacher.nip, specialization: teacher.specialization } : null,
-      };
-    });
-
-    if (filters?.role) {
-      return items.filter((u) => u.roles.includes(filters.role as UserRole));
-    }
-
-    return items;
   }
 
   // Fallback demo filtering
-  let result = [...demoUsersState];
+  let result = getDemoUsers();
 
   if (filters?.search) {
     const q = filters.search.toLowerCase();
@@ -124,16 +158,20 @@ export async function fetchUsersList(filters?: {
 
 export async function fetchTeachersWithoutAccount(): Promise<Teacher[]> {
   if (isSupabaseConfigured) {
-    const { data, error } = await supabase
-      .from('teachers')
-      .select('*')
-      .is('user_id', null)
-      .eq('is_active', true);
-    if (error) return [];
-    return data || [];
+    try {
+      const { data, error } = await supabase
+        .from('teachers')
+        .select('*')
+        .is('user_id', null)
+        .eq('is_active', true);
+      if (!error && data && data.length > 0) return data;
+      if (error) console.warn('Supabase fetchTeachersWithoutAccount fallback:', error.message);
+    } catch (err) {
+      console.warn('Supabase fetchTeachersWithoutAccount error:', err);
+    }
   }
 
-  return DEMO_TEACHERS.filter((t) => !demoUsersState.some((u) => u.teacher_info?.id === t.id));
+  return DEMO_TEACHERS.filter((t) => !getDemoUsers().some((u) => u.teacher_info?.id === t.id));
 }
 
 export async function createUserWithRoles(data: CreateUserData, adminId: string): Promise<UserListItem> {
@@ -142,21 +180,23 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string)
   }
 
   if (isSupabaseConfigured) {
-    // Memanggil backend server / Edge Function via RPC atau Auth Invite
-    const { data: result, error } = await supabase.rpc('admin_create_user_with_roles', {
-      p_email: data.email,
-      p_full_name: data.full_name,
-      p_phone: data.phone_number || null,
-      p_roles: data.roles,
-      p_teacher_id: data.teacher_id || null,
-    });
+    try {
+      // Memanggil backend server / Edge Function via RPC atau Auth Invite
+      const { data: result, error } = await supabase.rpc('admin_create_user_with_roles', {
+        p_email: data.email,
+        p_full_name: data.full_name,
+        p_phone: data.phone_number || null,
+        p_roles: data.roles,
+        p_teacher_id: data.teacher_id || null,
+      });
 
-    if (error) {
-      // Jika RPC belum ada, gunakan penanganan terpadu
-      throw new Error(`Gagal membuat akun: ${error.message}`);
+      if (!error && result) {
+        return result;
+      }
+      console.warn('Supabase admin_create_user_with_roles fallback:', error?.message);
+    } catch (err) {
+      console.warn('Supabase createUserWithRoles error, fallback to local store:', err);
     }
-
-    return result;
   }
 
   // Demo Mode Creation
@@ -179,7 +219,9 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string)
       : null,
   };
 
-  demoUsersState = [newItem, ...demoUsersState];
+  const currentUsers = getDemoUsers();
+  const updated = [newItem, ...currentUsers];
+  saveDemoUsers(updated);
   return newItem;
 }
 
@@ -193,30 +235,37 @@ export async function updateUserRolesAndStatus(
   }
 
   if (isSupabaseConfigured) {
-    // 1. Update status di profiles
-    const { error: profileError } = await supabase
-      .from('profiles')
-      .update({ is_active: isActive })
-      .eq('id', userId);
+    try {
+      // 1. Update status di profiles
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .update({ is_active: isActive })
+        .eq('id', userId);
 
-    if (profileError) throw new Error(profileError.message);
+      if (!profileError) {
+        // 2. Refresh roles di user_roles
+        await supabase.from('user_roles').delete().eq('user_id', userId);
 
-    // 2. Refresh roles di user_roles
-    await supabase.from('user_roles').delete().eq('user_id', userId);
+        const inserts = roles.map((r, idx) => ({
+          user_id: userId,
+          role: r,
+          is_primary: idx === 0,
+        }));
 
-    const inserts = roles.map((r, idx) => ({
-      user_id: userId,
-      role: r,
-      is_primary: idx === 0,
-    }));
-
-    const { error: rolesError } = await supabase.from('user_roles').insert(inserts);
-    if (rolesError) throw new Error(rolesError.message);
-    return;
+        const { error: rolesError } = await supabase.from('user_roles').insert(inserts);
+        if (!rolesError) return;
+        console.warn('Supabase insert user_roles error:', rolesError.message);
+      } else {
+        console.warn('Supabase update profile error:', profileError.message);
+      }
+    } catch (err) {
+      console.warn('Supabase updateUserRolesAndStatus error:', err);
+    }
   }
 
   // Update in demo store
-  demoUsersState = demoUsersState.map((u) => {
+  const currentUsers = getDemoUsers();
+  const updated = currentUsers.map((u) => {
     if (u.id === userId) {
       return {
         ...u,
@@ -226,6 +275,7 @@ export async function updateUserRolesAndStatus(
     }
     return u;
   });
+  saveDemoUsers(updated);
 }
 
 export async function fetchRecentActivityLogs(limit: number = 10): Promise<ActivityLog[]> {

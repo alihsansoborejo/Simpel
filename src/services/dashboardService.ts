@@ -103,31 +103,37 @@ export interface HomeroomDashboardData {
 
 export async function fetchAdminDashboardData(): Promise<AdminDashboardData> {
   if (isSupabaseConfigured) {
-    const [usersRes, teachersRes, studentsRes, classesRes, activeYearRes, activeSemRes, settingsRes] =
-      await Promise.all([
-        supabase.from('profiles').select('id, is_active', { count: 'exact' }),
-        supabase.from('teachers').select('id', { count: 'exact' }),
-        supabase.from('students').select('id', { count: 'exact' }),
-        supabase.from('classes').select('id', { count: 'exact' }),
-        supabase.from('academic_years').select('name').eq('is_active', true).maybeSingle(),
-        supabase.from('semesters').select('semester_type').eq('is_active', true).maybeSingle(),
-        supabase.from('system_settings').select('*').limit(1).maybeSingle(),
-      ]);
+    try {
+      const [usersRes, teachersRes, studentsRes, classesRes, activeYearRes, activeSemRes, settingsRes] =
+        await Promise.all([
+          supabase.from('profiles').select('id, is_active', { count: 'exact' }),
+          supabase.from('teachers').select('id', { count: 'exact' }),
+          supabase.from('students').select('id', { count: 'exact' }),
+          supabase.from('classes').select('id', { count: 'exact' }),
+          supabase.from('academic_years').select('name').eq('is_active', true).maybeSingle(),
+          supabase.from('semesters').select('semester_type').eq('is_active', true).maybeSingle(),
+          supabase.from('system_settings').select('*').limit(1).maybeSingle(),
+        ]);
 
-    const activeCount = (usersRes.data || []).filter((u: any) => u.is_active).length;
+      if (!usersRes.error && usersRes.count !== null) {
+        const activeCount = (usersRes.data || []).filter((u: any) => u.is_active).length;
 
-    return {
-      totalUsers: usersRes.count || 0,
-      totalTeachers: teachersRes.count || 0,
-      totalStudents: studentsRes.count || 0,
-      totalClasses: classesRes.count || 0,
-      activeAccountsCount: activeCount,
-      academicYearName: activeYearRes.data?.name || '2026/2027',
-      semesterName: activeSemRes.data?.semester_type || 'Ganjil',
-      isReportCardLocked: settingsRes.data?.is_report_card_locked || false,
-      schoolName: settingsRes.data?.school_name || 'MI Ma’arif Al Ihsan Soborejo',
-      principalName: settingsRes.data?.principal_name || 'Drs. H. Ahmad Ihsan, M.Pd.I',
-    };
+        return {
+          totalUsers: usersRes.count || 0,
+          totalTeachers: teachersRes.count || 0,
+          totalStudents: studentsRes.count || 0,
+          totalClasses: classesRes.count || 0,
+          activeAccountsCount: activeCount,
+          academicYearName: activeYearRes.data?.name || '2026/2027',
+          semesterName: activeSemRes.data?.semester_type || 'Ganjil',
+          isReportCardLocked: settingsRes.data?.is_report_card_locked || false,
+          schoolName: settingsRes.data?.school_name || 'MI Ma’arif Al Ihsan Soborejo',
+          principalName: settingsRes.data?.principal_name || 'Drs. H. Ahmad Ihsan, M.Pd.I',
+        };
+      }
+    } catch (err) {
+      console.warn('Supabase fetchAdminDashboardData fallback to demo:', err);
+    }
   }
 
   // Realistic Demo Data
@@ -147,57 +153,63 @@ export async function fetchAdminDashboardData(): Promise<AdminDashboardData> {
 
 export async function fetchPrincipalDashboardData(): Promise<PrincipalDashboardData> {
   if (isSupabaseConfigured) {
-    const [teachersCount, studentsCount, classesCount, docsRes, journalsRes] = await Promise.all([
-      supabase.from('teachers').select('id', { count: 'exact' }),
-      supabase.from('students').select('id', { count: 'exact' }),
-      supabase.from('classes').select('id', { count: 'exact' }),
-      supabase
-        .from('document_links')
-        .select('id, title, document_type, status, submission_date, google_drive_url, teacher:teachers(full_name)')
-        .order('submission_date', { ascending: false }),
-      supabase
-        .from('teaching_journals')
-        .select(`
-          id, date, topic,
-          assignment:teaching_assignments (
-            teacher:teachers(full_name),
-            subject:subjects(name),
-            class:classes(name)
-          )
-        `)
-        .order('date', { ascending: false })
-        .limit(5),
-    ]);
+    try {
+      const [teachersCount, studentsCount, classesCount, docsRes, journalsRes] = await Promise.all([
+        supabase.from('teachers').select('id', { count: 'exact' }),
+        supabase.from('students').select('id', { count: 'exact' }),
+        supabase.from('classes').select('id', { count: 'exact' }),
+        supabase
+          .from('document_links')
+          .select('id, title, document_type, status, submission_date, google_drive_url, teacher:teachers(full_name)')
+          .order('submission_date', { ascending: false }),
+        supabase
+          .from('teaching_journals')
+          .select(`
+            id, date, topic,
+            assignment:teaching_assignments (
+              teacher:teachers(full_name),
+              subject:subjects(name),
+              class:classes(name)
+            )
+          `)
+          .order('date', { ascending: false })
+          .limit(5),
+      ]);
 
-    const docs = docsRes.data || [];
-    const pending = docs.filter((d: any) => d.status === 'Diajukan');
-    const approved = docs.filter((d: any) => d.status === 'Disetujui');
+      if (!teachersCount.error) {
+        const docs = docsRes.data || [];
+        const pending = docs.filter((d: any) => d.status === 'Diajukan');
+        const approved = docs.filter((d: any) => d.status === 'Disetujui');
 
-    return {
-      totalTeachers: teachersCount.count || 0,
-      totalStudents: studentsCount.count || 0,
-      totalClasses: classesCount.count || 0,
-      pendingDocumentsCount: pending.length,
-      approvedDocumentsCount: approved.length,
-      totalJournalsToday: (journalsRes.data || []).length,
-      attendanceRateToday: 96.5,
-      pendingDocuments: pending.map((d: any) => ({
-        id: d.id,
-        title: d.title,
-        documentType: d.document_type,
-        teacherName: d.teacher?.full_name || 'Dewan Guru',
-        submissionDate: d.submission_date || new Date().toISOString(),
-        driveUrl: d.google_drive_url,
-      })),
-      recentJournals: (journalsRes.data || []).map((j: any) => ({
-        id: j.id,
-        teacherName: j.assignment?.teacher?.full_name || 'Guru Pengampu',
-        subjectName: j.assignment?.subject?.name || 'Mata Pelajaran',
-        className: j.assignment?.class?.name || 'Kelas',
-        date: j.date,
-        topic: j.topic,
-      })),
-    };
+        return {
+          totalTeachers: teachersCount.count || 0,
+          totalStudents: studentsCount.count || 0,
+          totalClasses: classesCount.count || 0,
+          pendingDocumentsCount: pending.length,
+          approvedDocumentsCount: approved.length,
+          totalJournalsToday: (journalsRes.data || []).length,
+          attendanceRateToday: 96.5,
+          pendingDocuments: pending.map((d: any) => ({
+            id: d.id,
+            title: d.title,
+            documentType: d.document_type,
+            teacherName: d.teacher?.full_name || 'Dewan Guru',
+            submissionDate: d.submission_date || new Date().toISOString(),
+            driveUrl: d.google_drive_url,
+          })),
+          recentJournals: (journalsRes.data || []).map((j: any) => ({
+            id: j.id,
+            teacherName: j.assignment?.teacher?.full_name || 'Guru Pengampu',
+            subjectName: j.assignment?.subject?.name || 'Mata Pelajaran',
+            className: j.assignment?.class?.name || 'Kelas',
+            date: j.date,
+            topic: j.topic,
+          })),
+        };
+      }
+    } catch (err) {
+      console.warn('Supabase fetchPrincipalDashboardData fallback to demo:', err);
+    }
   }
 
   // Demo Fallback
@@ -250,57 +262,63 @@ export async function fetchPrincipalDashboardData(): Promise<PrincipalDashboardD
 
 export async function fetchTeacherDashboardData(teacherId?: string | null): Promise<TeacherDashboardData> {
   if (isSupabaseConfigured && teacherId) {
-    const [teacherRes, assignmentsRes, docsRes, journalsRes] = await Promise.all([
-      supabase.from('teachers').select('*').eq('id', teacherId).single(),
-      supabase
-        .from('teaching_assignments')
-        .select('id, class:classes(name, phase), subject:subjects(name, code)')
-        .eq('teacher_id', teacherId),
-      supabase.from('document_links').select('id, status').eq('teacher_id', teacherId),
-      supabase
-        .from('teaching_journals')
-        .select(`
-          id, date, topic,
-          assignment:teaching_assignments!inner (
-            teacher_id,
-            class:classes(name),
-            subject:subjects(name)
-          )
-        `)
-        .eq('assignment.teacher_id', teacherId)
-        .order('date', { ascending: false })
-        .limit(5),
-    ]);
+    try {
+      const [teacherRes, assignmentsRes, docsRes, journalsRes] = await Promise.all([
+        supabase.from('teachers').select('*').eq('id', teacherId).single(),
+        supabase
+          .from('teaching_assignments')
+          .select('id, class:classes(name, phase), subject:subjects(name, code)')
+          .eq('teacher_id', teacherId),
+        supabase.from('document_links').select('id, status').eq('teacher_id', teacherId),
+        supabase
+          .from('teaching_journals')
+          .select(`
+            id, date, topic,
+            assignment:teaching_assignments!inner (
+              teacher_id,
+              class:classes(name),
+              subject:subjects(name)
+            )
+          `)
+          .eq('assignment.teacher_id', teacherId)
+          .order('date', { ascending: false })
+          .limit(5),
+      ]);
 
-    const assignments = (assignmentsRes.data || []).map((a: any) => ({
-      assignmentId: a.id,
-      className: a.class?.name || '',
-      subjectName: a.subject?.name || '',
-      subjectCode: a.subject?.code || '',
-      phase: a.class?.phase || 'B',
-    }));
+      if (!teacherRes.error && teacherRes.data) {
+        const assignments = (assignmentsRes.data || []).map((a: any) => ({
+          assignmentId: a.id,
+          className: a.class?.name || '',
+          subjectName: a.subject?.name || '',
+          subjectCode: a.subject?.code || '',
+          phase: a.class?.phase || 'B',
+        }));
 
-    const docs = docsRes.data || [];
+        const docs = docsRes.data || [];
 
-    return {
-      teacherName: teacherRes.data?.full_name || 'Guru Madrasah',
-      nip: teacherRes.data?.nip || '-',
-      specialization: teacherRes.data?.specialization || 'Pendidik',
-      assignedClassesCount: assignments.length,
-      totalSubjectsTaught: new Set(assignments.map((a) => a.subjectCode)).size,
-      assignedClasses: assignments,
-      submittedDocsCount: docs.length,
-      approvedDocsCount: docs.filter((d: any) => d.status === 'Disetujui').length,
-      revisionDocsCount: docs.filter((d: any) => d.status === 'Perlu Revisi').length,
-      journalsCount: (journalsRes.data || []).length,
-      recentJournals: (journalsRes.data || []).map((j: any) => ({
-        id: j.id,
-        date: j.date,
-        className: j.assignment?.class?.name || 'Kelas',
-        subjectName: j.assignment?.subject?.name || 'Mapel',
-        topic: j.topic,
-      })),
-    };
+        return {
+          teacherName: teacherRes.data?.full_name || 'Guru Madrasah',
+          nip: teacherRes.data?.nip || '-',
+          specialization: teacherRes.data?.specialization || 'Pendidik',
+          assignedClassesCount: assignments.length,
+          totalSubjectsTaught: new Set(assignments.map((a) => a.subjectCode)).size,
+          assignedClasses: assignments,
+          submittedDocsCount: docs.length,
+          approvedDocsCount: docs.filter((d: any) => d.status === 'Disetujui').length,
+          revisionDocsCount: docs.filter((d: any) => d.status === 'Perlu Revisi').length,
+          journalsCount: (journalsRes.data || []).length,
+          recentJournals: (journalsRes.data || []).map((j: any) => ({
+            id: j.id,
+            date: j.date,
+            className: j.assignment?.class?.name || 'Kelas',
+            subjectName: j.assignment?.subject?.name || 'Mapel',
+            topic: j.topic,
+          })),
+        };
+      }
+    } catch (err) {
+      console.warn('Supabase fetchTeacherDashboardData fallback to demo:', err);
+    }
   }
 
   // Demo fallback
@@ -340,41 +358,47 @@ export async function fetchTeacherDashboardData(teacherId?: string | null): Prom
 
 export async function fetchHomeroomDashboardData(homeroomClassId?: string | null): Promise<HomeroomDashboardData> {
   if (isSupabaseConfigured && homeroomClassId) {
-    const [classRes, studentsRes] = await Promise.all([
-      supabase.from('classes').select('name, phase').eq('id', homeroomClassId).single(),
-      supabase
-        .from('class_members')
-        .select('student:students(id, nis, full_name, gender, parent_phone)')
-        .eq('class_id', homeroomClassId),
-    ]);
+    try {
+      const [classRes, studentsRes] = await Promise.all([
+        supabase.from('classes').select('name, phase').eq('id', homeroomClassId).single(),
+        supabase
+          .from('class_members')
+          .select('student:students(id, nis, full_name, gender, parent_phone)')
+          .eq('class_id', homeroomClassId),
+      ]);
 
-    const students = (studentsRes.data || []).map((m: any) => ({
-      id: m.student?.id || '',
-      nis: m.student?.nis || '',
-      fullName: m.student?.full_name || '',
-      gender: m.student?.gender || 'L',
-      parentPhone: m.student?.parent_phone || null,
-    }));
+      if (!classRes.error && classRes.data) {
+        const students = (studentsRes.data || []).map((m: any) => ({
+          id: m.student?.id || '',
+          nis: m.student?.nis || '',
+          fullName: m.student?.full_name || '',
+          gender: m.student?.gender || 'L',
+          parentPhone: m.student?.parent_phone || null,
+        }));
 
-    return {
-      className: classRes.data?.name || 'Kelas Binaan',
-      phase: classRes.data?.phase || 'B',
-      totalStudents: students.length,
-      homeroomTeacherName: 'Ust. Ahmad Fauzi, S.Pd.I',
-      students,
-      attendanceSummary: {
-        hadirCount: students.length * 18,
-        sakitCount: 2,
-        izinCount: 1,
-        alpaCount: 0,
-        attendancePercentage: 97.8,
-      },
-      gradeCompletenessStatus: [
-        { subjectName: 'Al-Qur’an Hadis', teacherName: 'Ust. Ahmad Fauzi', isComplete: true, gradedStudentsCount: students.length, totalStudents: students.length },
-        { subjectName: 'Fikih', teacherName: 'Ust. Ahmad Fauzi', isComplete: true, gradedStudentsCount: students.length, totalStudents: students.length },
-        { subjectName: 'PJOK', teacherName: 'Ust. Muhammad Ridwan', isComplete: false, gradedStudentsCount: Math.max(0, students.length - 1), totalStudents: students.length },
-      ],
-    };
+        return {
+          className: classRes.data?.name || 'Kelas Binaan',
+          phase: classRes.data?.phase || 'B',
+          totalStudents: students.length,
+          homeroomTeacherName: 'Ust. Ahmad Fauzi, S.Pd.I',
+          students,
+          attendanceSummary: {
+            hadirCount: students.length * 18,
+            sakitCount: 2,
+            izinCount: 1,
+            alpaCount: 0,
+            attendancePercentage: 97.8,
+          },
+          gradeCompletenessStatus: [
+            { subjectName: 'Al-Qur’an Hadis', teacherName: 'Ust. Ahmad Fauzi', isComplete: true, gradedStudentsCount: students.length, totalStudents: students.length },
+            { subjectName: 'Fikih', teacherName: 'Ust. Ahmad Fauzi', isComplete: true, gradedStudentsCount: students.length, totalStudents: students.length },
+            { subjectName: 'PJOK', teacherName: 'Ust. Muhammad Ridwan', isComplete: false, gradedStudentsCount: Math.max(0, students.length - 1), totalStudents: students.length },
+          ],
+        };
+      }
+    } catch (err) {
+      console.warn('Supabase fetchHomeroomDashboardData fallback to demo:', err);
+    }
   }
 
   // Demo Fallback

@@ -168,7 +168,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
                       <ExternalLink className="w-3 h-3 text-slate-400" />
                     </a>
                     <button
-                      onClick={() => onNavigate('supervisi-drive')}
+                      onClick={() => onNavigate('arsip-drive')}
                       className="px-2.5 py-1.5 text-[11px] font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors"
                     >
                       Beri Nilai / Catatan
