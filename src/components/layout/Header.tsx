@@ -12,7 +12,10 @@ import {
   Calendar,
   Database,
   ArrowRightLeft,
+  HelpCircle,
 } from 'lucide-react';
+import { NotificationDrawer } from '../notification/NotificationDrawer';
+import { HelpGuideModal } from '../common/HelpGuideModal';
 
 interface HeaderProps {
   onToggleMobileNav: () => void;
@@ -24,6 +27,9 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, a
   const { user, activeRole, availableRoles, switchActiveRole, logout } = useAuth();
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isRoleMenuOpen, setIsRoleMenuOpen] = useState(false);
+  const [isNotificationOpen, setIsNotificationOpen] = useState(false);
+  const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(5);
   const profileRef = useRef<HTMLDivElement>(null);
   const roleRef = useRef<HTMLDivElement>(null);
 
@@ -118,21 +124,36 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, a
           </div>
         )}
 
-        {/* Notifications Icon */}
+        {/* Help Guide Modal Trigger */}
         <button
-          onClick={() => alert('Fitur notifikasi: Belum ada pengumuman mendesak.')}
-          className="relative p-2 text-slate-500 rounded-lg hover:bg-slate-100 hover:text-slate-700 transition-colors"
-          title="Notifikasi"
+          onClick={() => setIsHelpModalOpen(true)}
+          className="p-2 text-slate-500 rounded-lg hover:bg-slate-100 hover:text-emerald-800 transition-colors cursor-pointer"
+          title="Buku Panduan Penggunaan SIMPEL"
+        >
+          <HelpCircle className="w-5 h-5 stroke-[1.75]" />
+        </button>
+
+        {/* Notifications Icon with Dynamic Unread Badge */}
+        <button
+          onClick={() => setIsNotificationOpen(true)}
+          className="relative p-2 text-slate-500 rounded-lg hover:bg-slate-100 hover:text-slate-800 transition-colors cursor-pointer"
+          title="Pusat Notifikasi Akademik"
         >
           <Bell className="w-5 h-5 stroke-[1.75]" />
-          <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-emerald-600 rounded-full" />
+          {unreadCount > 0 ? (
+            <span className="absolute top-1 right-1 min-w-4 h-4 px-1 rounded-full bg-amber-500 text-slate-950 font-black text-[9px] flex items-center justify-center shadow-xs">
+              {unreadCount > 9 ? '9+' : unreadCount}
+            </span>
+          ) : (
+            <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-emerald-600 rounded-full" />
+          )}
         </button>
 
         {/* User Profile Dropdown */}
         <div className="relative" ref={profileRef}>
           <button
             onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
-            className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+            className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <div className="w-8 h-8 rounded-full bg-emerald-800 text-white font-semibold text-xs flex items-center justify-center shadow-xs">
               {user?.profile?.full_name?.charAt(0) || 'U'}
@@ -153,9 +174,12 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, a
                   {user?.profile?.full_name}
                 </p>
                 <p className="text-[11px] text-slate-500 truncate">{user?.email}</p>
-                <div className="mt-1.5">
+                <div className="mt-1.5 flex items-center gap-1.5">
                   <span className={`inline-block px-2 py-0.5 text-[10px] font-medium rounded border ${activeRoleConfig?.badgeColor}`}>
                     {activeRoleConfig?.label}
+                  </span>
+                  <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-slate-100 text-slate-500 border border-slate-200">
+                    v2.1 Prod
                   </span>
                 </div>
               </div>
@@ -170,6 +194,17 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, a
                 >
                   <User className="w-4 h-4 text-slate-400" />
                   <span>Profil & Pengaturan Akun</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setIsHelpModalOpen(true);
+                    setIsProfileMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2 px-4 py-2 text-xs text-slate-700 hover:bg-slate-50 transition-colors text-left"
+                >
+                  <HelpCircle className="w-4 h-4 text-slate-400" />
+                  <span>Buku Panduan SIMPEL</span>
                 </button>
               </div>
 
@@ -189,6 +224,21 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, a
           )}
         </div>
       </div>
+
+      {/* Interactive Notification Drawer */}
+      <NotificationDrawer
+        isOpen={isNotificationOpen}
+        onClose={() => setIsNotificationOpen(false)}
+        onNavigate={onNavigate}
+        onUnreadCountChange={(count) => setUnreadCount(count)}
+      />
+
+      {/* Interactive Help & User Guide Modal */}
+      <HelpGuideModal
+        isOpen={isHelpModalOpen}
+        onClose={() => setIsHelpModalOpen(false)}
+        onNavigate={onNavigate}
+      />
     </header>
   );
 };

@@ -26,6 +26,13 @@ export const ProfilePage: React.FC = () => {
   const [isResetting, setIsResetting] = useState(false);
   const [resetMessage, setResetMessage] = useState<string | null>(null);
 
+  // Direct password change state
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [isChangingPass, setIsChangingPass] = useState(false);
+  const [passSuccess, setPassSuccess] = useState<string | null>(null);
+  const [passError, setPassError] = useState<string | null>(null);
+
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
@@ -188,26 +195,103 @@ export const ProfilePage: React.FC = () => {
           <div className="bg-white rounded-xl border border-slate-200/80 p-5 shadow-xs">
             <h4 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
               <KeyRound className="w-4 h-4 text-emerald-700" />
-              <span>Keamanan Kata Sandi</span>
+              <span>Ganti Kata Sandi</span>
             </h4>
             <p className="text-xs text-slate-500 mb-3">
-              Perbarui kata sandi Anda secara berkala untuk menjaga kerahasiaan data penilaian dan siswa.
+              Perbarui kata sandi akun madrasah Anda secara langsung di bawah ini.
             </p>
 
-            {resetMessage ? (
-              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
-                {resetMessage}
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setPassError(null);
+                setPassSuccess(null);
+                if (newPassword.length < 6) {
+                  setPassError('Kata sandi baru minimal harus 6 karakter.');
+                  return;
+                }
+                if (newPassword !== confirmPassword) {
+                  setPassError('Konfirmasi kata sandi tidak cocok.');
+                  return;
+                }
+                setIsChangingPass(true);
+                try {
+                  const { changePassword } = await import('../../services/authService');
+                  await changePassword(newPassword);
+                  setPassSuccess('Kata sandi berhasil diperbarui.');
+                  setNewPassword('');
+                  setConfirmPassword('');
+                } catch (err: any) {
+                  setPassError(err.message || 'Gagal mengubah kata sandi.');
+                } finally {
+                  setIsChangingPass(false);
+                }
+              }}
+              className="space-y-3"
+            >
+              {passSuccess && (
+                <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-800 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>{passSuccess}</span>
+                </div>
+              )}
+              {passError && (
+                <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-[11px] text-rose-800 flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                  <span>{passError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Kata Sandi Baru</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Minimal 6 karakter"
+                  className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-emerald-600"
+                  required
+                />
               </div>
-            ) : (
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Konfirmasi Kata Sandi</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Ulangi kata sandi baru"
+                  className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:outline-emerald-600"
+                  required
+                />
+              </div>
+
               <button
-                type="button"
-                onClick={handleSendResetEmail}
-                disabled={isResetting}
-                className="w-full py-2 px-3 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200 disabled:opacity-50"
+                type="submit"
+                disabled={isChangingPass}
+                className="w-full py-2 px-3 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors shadow-xs disabled:opacity-50"
               >
-                {isResetting ? 'Mengirim...' : 'Kirim Tautan Ubah Sandi'}
+                {isChangingPass ? 'Memperbarui...' : 'Ubah Kata Sandi Sekarang'}
               </button>
-            )}
+            </form>
+
+            <div className="pt-4 mt-4 border-t border-slate-100">
+              <p className="text-[11px] text-slate-500 mb-2">Atau minta tautan pemulihan melalui email:</p>
+              {resetMessage ? (
+                <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-800">
+                  {resetMessage}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSendResetEmail}
+                  disabled={isResetting}
+                  className="w-full py-1.5 px-3 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200 disabled:opacity-50"
+                >
+                  {isResetting ? 'Mengirim...' : 'Kirim Tautan Email Reset'}
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="bg-emerald-50/60 rounded-xl border border-emerald-200/80 p-5">

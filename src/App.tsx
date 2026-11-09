@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { AppSettingsProvider } from './context/AppSettingsContext';
 import { LoginPage } from './features/auth/LoginPage';
 import { AppLayout } from './components/layout/AppLayout';
 import { DashboardPage } from './features/dashboard/DashboardPage';
@@ -25,6 +26,13 @@ import { StudentGuidancePage } from './features/guidance/StudentGuidancePage';
 import { SupervisionPage } from './features/supervision/SupervisionPage';
 import { CurriculumManagementPage } from './features/curriculum/CurriculumManagementPage';
 import { EvaluationManagementPage } from './features/assessment/EvaluationManagementPage';
+import { AIAssistantPage } from './features/ai/AIAssistantPage';
+
+// Modul Tahap 8: Implementasi, Migrasi Data, Identitas, & Uji Coba Operasional
+import { InstitutionSettingsPage } from './features/settings/InstitutionSettingsPage';
+import { DataMigrationPage } from './features/academic/DataMigrationPage';
+import { IssueTrackingPage } from './features/settings/IssueTrackingPage';
+import { HelpCenterPage } from './features/settings/HelpCenterPage';
 
 import {
   CalendarCheck,
@@ -63,7 +71,7 @@ const MainAppContent: React.FC = () => {
 
   // Pemeriksaan Hak Akses (Route Guard berdasarkan activeRole)
   const isAuthorized = (view: string): boolean => {
-    if (view === 'dashboard' || view === 'profil') return true;
+    if (view === 'dashboard' || view === 'profil' || view === 'pusat-bantuan' || view === 'lapor-kendala' || view.startsWith('asisten-ai')) return true;
 
     if (
       view.startsWith('penugasan-') ||
@@ -74,6 +82,8 @@ const MainAppContent: React.FC = () => {
         'master-kelas',
         'master-mapel',
         'penugasan-guru',
+        'migrasi-data',
+        'pengaturan-identitas',
         'pengaturan-akademik',
         'log-aktivitas',
       ].includes(view)
@@ -182,6 +192,18 @@ const MainAppContent: React.FC = () => {
       case 'pengaturan-akademik':
         return <AcademicSettingsPage />;
 
+      case 'pengaturan-identitas':
+        return <InstitutionSettingsPage />;
+
+      case 'migrasi-data':
+        return <DataMigrationPage />;
+
+      case 'lapor-kendala':
+        return <IssueTrackingPage />;
+
+      case 'pusat-bantuan':
+        return <HelpCenterPage />;
+
       case 'arsip-drive':
         return <CurriculumDocsPage />;
 
@@ -231,7 +253,7 @@ const MainAppContent: React.FC = () => {
         return <AttendancePage />;
 
       case 'jurnal-mengajar':
-        return <TeachingJournalPage />;
+        return <TeachingJournalPage onNavigate={setActiveView} />;
 
       case 'bimbingan-siswa':
         return <StudentGuidancePage />;
@@ -255,15 +277,27 @@ const MainAppContent: React.FC = () => {
         );
 
       case 'asisten-ai':
-        return (
-          <ModulePlaceholder
-            title="Asisten Cerdas Gemini API"
-            stageName="Tahap 10"
-            description="Generator draf Modul Ajar, ATP, rubrik asesmen, dan LKPD dengan enkripsi privasi siswa."
-            icon={Sparkles}
-            onBack={() => setActiveView('dashboard')}
-          />
-        );
+      case 'asisten-ai-modul':
+      case 'asisten-ai-lkpd':
+      case 'asisten-ai-soal':
+      case 'asisten-ai-ide':
+      case 'asisten-ai-refleksi':
+      case 'asisten-ai-analisis':
+      case 'asisten-ai-kamad':
+      case 'asisten-ai-chat': {
+        const tabMap: Record<string, string> = {
+          'asisten-ai-modul': 'modul-ajar',
+          'asisten-ai-lkpd': 'lkpd',
+          'asisten-ai-soal': 'soal-asesmen',
+          'asisten-ai-ide': 'ide-pembelajaran',
+          'asisten-ai-refleksi': 'refleksi-guru',
+          'asisten-ai-analisis': 'analisis-belajar',
+          'asisten-ai-kamad': 'kepala-madrasah',
+          'asisten-ai-chat': 'tanya-jawab',
+        };
+        const defaultTab = tabMap[activeView] || 'modul-ajar';
+        return <AIAssistantPage initialTab={defaultTab} onNavigate={setActiveView} />;
+      }
 
       case 'log-aktivitas':
       case 'laporan-madrasah':
@@ -291,8 +325,10 @@ const MainAppContent: React.FC = () => {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <MainAppContent />
-    </AuthProvider>
+    <AppSettingsProvider>
+      <AuthProvider>
+        <MainAppContent />
+      </AuthProvider>
+    </AppSettingsProvider>
   );
 }

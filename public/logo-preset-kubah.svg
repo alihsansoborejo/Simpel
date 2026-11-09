@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="100%" height="100%">
+  <defs>
+    <linearGradient id="kubahEmerald" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#022c22" />
+    </linearGradient>
+    <linearGradient id="kubahGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a" />
+      <stop offset="50%" stop-color="#eab308" />
+      <stop offset="100%" stop-color="#a16207" />
+    </linearGradient>
+  </defs>
+  <!-- Background Shape: Octagonal Islamic Star -->
+  <rect x="18" y="18" width="164" height="164" rx="28" fill="url(#kubahEmerald)" stroke="url(#kubahGold)" stroke-width="4" />
+  <rect x="25" y="25" width="150" height="150" rx="22" fill="none" stroke="#fde047" stroke-width="1.2" stroke-dasharray="4,4" opacity="0.6" />
+  
+  <!-- Mosque Dome Silhouette (Kubah Hijau Emas) -->
+  <path d="M100,45 C115,65 140,82 140,110 L60,110 C60,82 85,65 100,45 Z" fill="#064e3b" stroke="url(#kubahGold)" stroke-width="2.5" />
+  <!-- Crescent & Star on top of Dome -->
+  <path d="M98,34 A6,6 0 1 0 104,44 A4.5,4.5 0 1 1 98,34 Z" fill="url(#kubahGold)" />
+  <circle cx="106" cy="36" r="1.5" fill="#fde047" />
+
+  <!-- Open Quran / Book at bottom -->
+  <path d="M68,122 C82,116 95,118 100,123 C105,118 118,116 132,122 C130,140 105,138 100,144 C95,138 70,140 68,122 Z" fill="#ffffff" stroke="url(#kubahGold)" stroke-width="1.8" />
+  <path d="M100,123 L100,144" stroke="#047857" stroke-width="1.8" />
+
+  <!-- Ribbon Banner -->
+  <path d="M48,154 C75,148 125,148 152,154 L146,168 C122,163 78,163 54,168 Z" fill="url(#kubahGold)" />
+  <text x="100" y="162" font-family="'Plus Jakarta Sans', Arial, sans-serif" font-size="7.5" font-weight="900" fill="#022c22" text-anchor="middle" letter-spacing="1">MI AL IHSAN</text>
+</svg>

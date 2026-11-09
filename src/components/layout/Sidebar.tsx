@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useAppSettings } from '../../context/AppSettingsContext';
 import {
   LayoutDashboard,
   Users,
@@ -24,6 +25,7 @@ import {
   Folder,
   FileCode2,
   ListOrdered,
+  LifeBuoy,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -47,6 +49,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onCloseMobile,
 }) => {
   const { activeRole, logout } = useAuth();
+  const { logoUrl, settings } = useAppSettings();
   const [openSubjects, setOpenSubjects] = useState<Record<string, boolean>>({
     bi: true,
     ipas: false,
@@ -82,13 +85,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
               { id: 'master-kelas', label: 'Kelas 1 s.d. 6', icon: School },
               { id: 'master-mapel', label: 'Mata Pelajaran', icon: BookOpen },
               { id: 'penugasan-guru', label: 'Penugasan Mengajar (SK)', icon: ClipboardList },
+              { id: 'migrasi-data', label: 'Pusat Migrasi Data', icon: FileSpreadsheet, badge: 'Impor' },
+              { id: 'pengaturan-identitas', label: 'Identitas & Logo', icon: School, badge: 'Tahap 8' },
               { id: 'pengaturan-akademik', label: 'Tahun Ajaran & KKTP', icon: Database },
             ],
           },
           {
-            section: 'AUDIT & KEAMANAN',
+            section: 'AUDIT & OPERASIONAL',
             items: [
+              { id: 'lapor-kendala', label: 'Evaluasi & Lapor Kendala', icon: LifeBuoy, badge: 'Tahap 8' },
+              { id: 'pusat-bantuan', label: 'Pusat Bantuan & Panduan', icon: BookOpen },
               { id: 'log-aktivitas', label: 'Log Aktivitas Sistem', icon: ClipboardList },
+              { id: 'asisten-ai', label: 'Asisten AI Gemini', icon: Sparkles, badge: 'Tahap 6' },
             ],
           },
         ];
@@ -111,6 +119,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
               { id: 'analisis-nilai', label: 'Analisis Hasil Belajar', icon: TrendingUp },
               { id: 'pengesahan-rapor', label: 'Pengesahan & Kunci Rapor', icon: CheckCircle2 },
               { id: 'laporan-madrasah', label: 'Laporan Mutu Akademik', icon: FileSpreadsheet },
+              { id: 'lapor-kendala', label: 'Evaluasi & Lapor Kendala', icon: LifeBuoy },
+              { id: 'pusat-bantuan', label: 'Pusat Bantuan SIMPEL', icon: BookOpen },
+            ],
+          },
+          {
+            section: 'KECERDASAN BUATAN',
+            items: [
+              { id: 'asisten-ai-kamad', label: 'AI Asisten Kepala Madrasah', icon: Sparkles, badge: 'Eksekutif' },
+              { id: 'asisten-ai', label: 'Hub Seluruh Asisten AI', icon: Sparkles },
             ],
           },
         ];
@@ -131,6 +148,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
             items: [
               { id: 'catatan-perkembangan', label: 'Catatan Karakter Siswa', icon: FileText },
               { id: 'pengolahan-rapor', label: 'Olah & Cetak Rapor', icon: FileSpreadsheet },
+              { id: 'lapor-kendala', label: 'Evaluasi & Kendala', icon: LifeBuoy },
+              { id: 'pusat-bantuan', label: 'Pusat Bantuan', icon: BookOpen },
+            ],
+          },
+          {
+            section: 'ASISTEN CERDAS',
+            items: [
+              { id: 'asisten-ai-analisis', label: 'AI Analisis & Narasi Rapor', icon: Sparkles, badge: 'Cerdas' },
+              { id: 'asisten-ai', label: 'Asisten AI Gemini', icon: Sparkles },
             ],
           },
         ];
@@ -160,15 +186,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
       >
         {/* Brand Lockup */}
         <div className="flex items-center justify-between h-16 px-5 bg-emerald-900/80 border-b border-emerald-800/80 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-emerald-700 text-amber-300 font-extrabold text-lg shadow-inner">
-              IH
-            </div>
-            <div>
-              <h1 className="text-sm font-bold tracking-tight text-white leading-tight">
+          <div className="flex items-center gap-3 truncate">
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt="Logo Madrasah"
+                className="w-10 h-10 object-contain rounded-lg shrink-0 p-0.5 bg-emerald-950/50 border border-emerald-700/60 shadow-xs"
+              />
+            ) : (
+              <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-emerald-700 text-amber-300 font-extrabold text-lg shadow-inner shrink-0">
+                IH
+              </div>
+            )}
+            <div className="truncate">
+              <h1 className="text-sm font-bold tracking-tight text-white leading-tight truncate">
                 SIMPEL MI AL IHSAN
               </h1>
-              <p className="text-[10px] text-emerald-200 font-medium">MI Ma’arif Al Ihsan Soborejo</p>
+              <p className="text-[10px] text-emerald-200 font-medium truncate">
+                {settings?.school_name || 'MI Ma’arif Al Ihsan Soborejo'}
+              </p>
             </div>
           </div>
           <button
@@ -544,6 +580,30 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-400 text-slate-900">
                       Cerdas
                     </span>
+                  </button>
+
+                  <button
+                    onClick={() => handleItemClick('lapor-kendala')}
+                    className={`flex items-center gap-2.5 w-full px-3 py-2 text-xs font-medium rounded-lg transition-colors text-left ${
+                      activeView === 'lapor-kendala'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <LifeBuoy className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>Lapor Kendala Teknis</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleItemClick('pusat-bantuan')}
+                    className={`flex items-center gap-2.5 w-full px-3 py-2 text-xs font-medium rounded-lg transition-colors text-left ${
+                      activeView === 'pusat-bantuan'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <BookOpen className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Pusat Bantuan SIMPEL</span>
                   </button>
                 </div>
               </div>

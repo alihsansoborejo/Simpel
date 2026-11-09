@@ -331,6 +331,17 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
 
         {/* Action Buttons */}
         <div className="flex items-center gap-2 flex-wrap">
+          {onNavigate && (
+            <button
+              onClick={() => onNavigate(activeTab === 'lkpd' ? 'asisten-ai-lkpd' : 'asisten-ai-modul')}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-emerald-950 bg-amber-400 hover:bg-amber-300 transition-colors shadow-xs cursor-pointer"
+              title="Buat Rancangan Otomatis dengan AI Gemini"
+            >
+              <Sparkles className="w-4 h-4 text-emerald-950" />
+              <span>Buat dengan AI</span>
+            </button>
+          )}
+
           <button
             onClick={handleExportCSV}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors border border-slate-200"

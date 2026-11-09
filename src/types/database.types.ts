@@ -50,6 +50,8 @@ export interface SystemSettings {
   active_semester_id: string | null;
   kktp_default: number;
   is_report_card_locked: boolean;
+  logo_url?: string | null;
+  favicon_url?: string | null;
   updated_at: string;
 }
 
@@ -448,4 +450,32 @@ export interface LearningSchedule {
   end_time: string;
   assignment?: TeachingAssignment;
 }
+
+// ==========================================
+// TAHAP 7: SISTEM NOTIFIKASI INTERNAL OPERASIONAL
+// ==========================================
+export type NotificationCategory =
+  | 'presensi'
+  | 'jurnal'
+  | 'dokumen'
+  | 'revisi_dokumen'
+  | 'nilai'
+  | 'supervisi'
+  | 'tindak_lanjut_supervisi'
+  | 'akademik'
+  | 'pengumuman';
+
+export interface AppNotification {
+  id: string;
+  recipient_id?: string | null;
+  target_role?: UserRole | 'semua';
+  category: NotificationCategory;
+  title: string;
+  message: string;
+  action_url?: string;
+  is_read: boolean;
+  created_at: string;
+}
+
+
 

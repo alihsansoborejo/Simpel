@@ -45,6 +45,8 @@ export const DEMO_SYSTEM_SETTINGS: SystemSettings = {
   active_semester_id: 'sem-ganjil-2026',
   kktp_default: 75,
   is_report_card_locked: false,
+  logo_url: '/logo-mi-alihsan.svg',
+  favicon_url: '/favicon.svg',
   updated_at: '2026-11-04T08:00:00+07:00',
 };
 

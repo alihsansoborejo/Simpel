@@ -366,11 +366,11 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
 
           {onNavigate && (
             <button
-              onClick={() => onNavigate('asisten-ai')}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-slate-900 bg-amber-400 hover:bg-amber-500 transition-colors shadow-xs"
+              onClick={() => onNavigate(activeTab === 'analisis-nilai' || activeTab === 'remedial-pengayaan' ? 'asisten-ai-analisis' : 'asisten-ai-soal')}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-slate-900 bg-amber-400 hover:bg-amber-500 transition-colors shadow-xs cursor-pointer"
             >
               <Sparkles className="w-4 h-4 text-emerald-950" />
-              <span>Bantu AI Soal</span>
+              <span>Bantu AI Asesmen</span>
             </button>
           )}
         </div>

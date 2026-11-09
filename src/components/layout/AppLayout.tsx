@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
+import { Breadcrumbs } from './Breadcrumbs';
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -30,6 +31,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children, activeView, onNa
         />
 
         <main className="flex-1 p-4 md:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+          {activeView !== 'dashboard' && (
+            <Breadcrumbs activeView={activeView} onNavigate={onNavigate} />
+          )}
           {children}
         </main>
       </div>

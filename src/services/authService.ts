@@ -226,3 +226,19 @@ export async function updateUserProfile(
 
   throw new Error('Pengguna tidak ditemukan.');
 }
+
+export async function changePassword(newPassword: string): Promise<void> {
+  if (!newPassword || newPassword.length < 6) {
+    throw new Error('Kata sandi baru minimal harus 6 karakter.');
+  }
+
+  if (isSupabaseConfigured) {
+    const { error } = await supabase.auth.updateUser({
+      password: newPassword,
+    });
+    if (error) {
+      throw new Error(`Gagal mengubah kata sandi: ${error.message}`);
+    }
+  }
+}
+

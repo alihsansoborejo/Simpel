@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useAppSettings } from '../../context/AppSettingsContext';
 import { requestPasswordReset } from '../../services/authService';
 import { isSupabaseConfigured } from '../../lib/supabaseClient';
 import { Modal } from '../../components/ui/Modal';
@@ -18,6 +19,7 @@ import {
 
 export const LoginPage: React.FC = () => {
   const { login, loginAsDemo, isLoading, error } = useAuth();
+  const { logoUrl, settings } = useAppSettings();
   const [email, setEmail] = useState('alihsansoborejo@gmail.com');
   const [password, setPassword] = useState('AlIhsan2026!');
   const [showPassword, setShowPassword] = useState(false);
@@ -78,11 +80,21 @@ export const LoginPage: React.FC = () => {
 
         {/* Top Header */}
         <div className="relative z-10 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-emerald-700/80 border border-emerald-600 flex items-center justify-center font-extrabold text-amber-300 text-xl shadow-inner">
-            IH
-          </div>
+          {logoUrl ? (
+            <img
+              src={logoUrl}
+              alt="Logo Madrasah"
+              className="w-12 h-12 object-contain rounded-xl p-1 bg-emerald-950/40 border border-emerald-600/70 shadow-md shrink-0"
+            />
+          ) : (
+            <div className="w-11 h-11 rounded-xl bg-emerald-700/80 border border-emerald-600 flex items-center justify-center font-extrabold text-amber-300 text-xl shadow-inner shrink-0">
+              IH
+            </div>
+          )}
           <div>
-            <h1 className="text-base font-bold tracking-tight">MI MA’ARIF AL IHSAN</h1>
+            <h1 className="text-base font-bold tracking-tight">
+              {settings?.school_name ? settings.school_name.toUpperCase() : 'MI MA’ARIF AL IHSAN'}
+            </h1>
             <p className="text-xs text-emerald-200">Soborejo, Pringsurat, Temanggung</p>
           </div>
         </div>
@@ -124,12 +136,20 @@ export const LoginPage: React.FC = () => {
         <div className="w-full max-w-md">
           {/* Mobile Brand Header */}
           <div className="flex items-center gap-3 mb-8 lg:hidden">
-            <div className="w-9 h-9 rounded-lg bg-emerald-800 text-amber-300 font-bold flex items-center justify-center text-lg">
-              IH
-            </div>
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt="Logo Madrasah"
+                className="w-10 h-10 object-contain rounded-lg p-0.5 bg-emerald-950/20 border border-emerald-700/40 shrink-0"
+              />
+            ) : (
+              <div className="w-9 h-9 rounded-lg bg-emerald-800 text-amber-300 font-bold flex items-center justify-center text-lg shrink-0">
+                IH
+              </div>
+            )}
             <div>
               <h2 className="text-sm font-bold text-slate-900 leading-tight">SIMPEL MI AL IHSAN</h2>
-              <p className="text-xs text-slate-500">MI Ma’arif Al Ihsan Soborejo</p>
+              <p className="text-xs text-slate-500">{settings?.school_name || 'MI Ma’arif Al Ihsan Soborejo'}</p>
             </div>
           </div>
 

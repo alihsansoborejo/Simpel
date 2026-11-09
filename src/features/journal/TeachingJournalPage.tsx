@@ -19,7 +19,11 @@ import {
   Filter,
 } from 'lucide-react';
 
-export const TeachingJournalPage: React.FC = () => {
+interface TeachingJournalPageProps {
+  onNavigate?: (view: string) => void;
+}
+
+export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavigate }) => {
   const { user, activeRole } = useAuth();
   const [journals, setJournals] = useState<TeachingJournal[]>([]);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
@@ -161,6 +165,17 @@ export const TeachingJournalPage: React.FC = () => {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {onNavigate && (
+            <button
+              onClick={() => onNavigate('asisten-ai-refleksi')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold rounded-lg shadow-xs transition-colors cursor-pointer"
+              title="Konsultasi kendala kelas dan solusi dengan Asisten AI"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-emerald-950" />
+              <span>Analisis Refleksi AI</span>
+            </button>
+          )}
+
           {/* Tombol Ekspor CSV */}
           <button
             onClick={exportToCSV}

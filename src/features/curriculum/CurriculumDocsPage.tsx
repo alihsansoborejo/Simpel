@@ -50,10 +50,13 @@ export const CurriculumDocsPage: React.FC = () => {
     loadDocs();
   }, []);
 
+  const DRIVE_REGEX = /^(https?:\/\/)?(drive|docs)\.google\.com\/(file\/d\/|document\/d\/|spreadsheets\/d\/|presentation\/d\/|drive\/folders\/|open\?id=|[a-zA-Z0-9_-]+).*/i;
+
   const handleCreateDocument = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!driveUrl.includes('drive.google.com') && !driveUrl.includes('docs.google.com')) {
-      alert('Tautan dokumen wajib mengarah ke Google Drive atau Google Docs resmi.');
+    if (!DRIVE_REGEX.test(driveUrl.trim())) {
+      setStatusMessage('Format tautan tidak valid! Gunakan format tautan Google Drive / Docs / Spreadsheets resmi.');
+      setTimeout(() => setStatusMessage(null), 4000);
       return;
     }
 
@@ -66,7 +69,7 @@ export const CurriculumDocsPage: React.FC = () => {
         subject_id: 'sbj-ind',
         document_type: docType,
         title,
-        google_drive_url: driveUrl,
+        google_drive_url: driveUrl.trim(),
         file_id: null,
         status: 'Draft',
         submission_date: null,
@@ -168,6 +171,30 @@ export const CurriculumDocsPage: React.FC = () => {
           <Plus className="w-4 h-4" />
           <span>Tautkan Dokumen Baru</span>
         </button>
+      </div>
+
+      {/* Panduan Google Drive Institusi */}
+      <div className="bg-emerald-50/70 border border-emerald-200/90 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <div className="p-2 bg-emerald-800 text-white rounded-lg shrink-0 mt-0.5">
+            <FolderSync className="w-4 h-4" />
+          </div>
+          <div>
+            <h4 className="text-xs font-bold text-emerald-950">Pedoman Integrasi Google Drive Institusi</h4>
+            <p className="text-[11px] text-emerald-800 mt-0.5 leading-relaxed">
+              Semua berkas pembelajaran (CP, TP, ATP, Modul Ajar, LKPD) disimpan pada Google Shared Drive resmi madrasah. Supabase hanya mengelola metadata, penelaahan, dan tautan dokumen. Pastikan izin berbagi disetel ke "Siapa saja dengan tautan (Akses Melihat/Pemberi Komentar)".
+            </p>
+          </div>
+        </div>
+        <a
+          href="https://drive.google.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-emerald-300 text-emerald-900 rounded-lg text-xs font-semibold hover:bg-emerald-100/50 transition-colors shrink-0 shadow-2xs"
+        >
+          <span>Buka Google Drive</span>
+          <ExternalLink className="w-3.5 h-3.5" />
+        </a>
       </div>
 
       {statusMessage && (
