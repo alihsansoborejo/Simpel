@@ -48,10 +48,10 @@ export const DataMigrationPage: React.FC = () => {
       ];
     } else if (category === 'siswa') {
       filename = 'template_impor_siswa_mi_alihsan.csv';
-      headers = ['NIS', 'NISN', 'Nama_Lengkap', 'Nama_Panggilan', 'JK', 'Tempat_Lahir', 'Tanggal_Lahir_YYYY_MM_DD', 'Nama_Orang_Tua', 'No_HP_Wali', 'Alamat'];
+      headers = ['NIS', 'NISN', 'Nama_Lengkap', 'Nama_Panggilan', 'Tingkat_Kelas', 'JK', 'Tempat_Lahir', 'Tanggal_Lahir_YYYY_MM_DD', 'Nama_Orang_Tua', 'No_HP_Wali', 'Alamat'];
       sampleRows = [
-        ['260401', '0145678901', 'Muhammad Zaky Pratama', 'Zaky', 'L', 'Temanggung', '2016-04-12', 'Bambang Sutrisno', '08122334455', 'Soborejo RT 02 RW 01, Pringsurat'],
-        ['260402', '0145678902', 'Fatimah Az-Zahra', 'Fatimah', 'P', 'Temanggung', '2016-08-25', 'Agus Supriyanto', '08577889900', 'Soborejo RT 01 RW 02, Pringsurat'],
+        ['260401', '0145678901', 'Muhammad Zaky Pratama', 'Zaky', '4', 'L', 'Temanggung', '2016-04-12', 'Bambang Sutrisno', '08122334455', 'Soborejo RT 02 RW 01, Pringsurat'],
+        ['260402', '0145678902', 'Fatimah Az-Zahra', 'Fatimah', '4', 'P', 'Temanggung', '2016-08-25', 'Agus Supriyanto', '08577889900', 'Soborejo RT 01 RW 02, Pringsurat'],
       ];
     } else if (category === 'kelas') {
       filename = 'template_impor_kelas_mi_alihsan.csv';
@@ -139,10 +139,19 @@ export const DataMigrationPage: React.FC = () => {
         const nisn = rowData['NISN'] || '';
         const nama = rowData['Nama_Lengkap'] || '';
         const jk = rowData['JK'] || '';
+        const tingkatKelas = rowData['Tingkat_Kelas'] || '';
 
         if (!nis || !nama) {
           status = 'error';
           messages.push('NIS dan Nama Lengkap wajib diisi.');
+        }
+
+        if (!tingkatKelas) {
+          status = 'warning';
+          messages.push('Tingkat Kelas kosong (disarankan diisi 1 sampai 6 untuk penempatan rombel).');
+        } else if (!['1', '2', '3', '4', '5', '6'].includes(tingkatKelas.trim())) {
+          status = 'error';
+          messages.push(`Tingkat Kelas "${tingkatKelas}" tidak valid. Harus angka 1 s.d. 6.`);
         }
 
         if (nisn && nisn.length !== 10) {
@@ -200,7 +209,7 @@ export const DataMigrationPage: React.FC = () => {
       for (const row of validRows) {
         try {
           if (selectedCategory === 'siswa') {
-            await academicService.createStudent({
+            const created = await academicService.createStudent({
               nis: row.data['NIS'],
               nisn: row.data['NISN'] || null,
               full_name: row.data['Nama_Lengkap'],
@@ -213,6 +222,17 @@ export const DataMigrationPage: React.FC = () => {
               address: row.data['Alamat'] || 'Soborejo, Pringsurat',
               is_active: true,
             });
+
+            // Otomatis masukkan ke anggota rombel kelas yang sesuai jika Tingkat_Kelas diisi
+            const tk = row.data['Tingkat_Kelas']?.trim();
+            if (tk && ['1', '2', '3', '4', '5', '6'].includes(tk)) {
+              try {
+                await academicService.assignStudentToClass(created.id, `cls-${tk}`, 'ay-2026');
+              } catch (clsErr) {
+                console.warn('Gagal assign rombel siswa otomatis:', clsErr);
+              }
+            }
+
             successCount++;
           } else if (selectedCategory === 'guru') {
             await academicService.createTeacher({

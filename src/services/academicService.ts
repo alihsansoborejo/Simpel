@@ -9,6 +9,7 @@ import {
   TeachingAssignment,
   SystemSettings,
   ClassMember,
+  HomeroomAssignment,
 } from '../types/database.types';
 import {
   DEMO_ACADEMIC_YEAR,
@@ -20,6 +21,7 @@ import {
   DEMO_TEACHING_ASSIGNMENTS,
   DEMO_SYSTEM_SETTINGS,
   DEMO_CLASS_MEMBERS,
+  DEMO_HOMEROOM_ASSIGNMENTS,
 } from '../lib/demoData';
 
 const STORAGE_KEYS = {
@@ -32,6 +34,7 @@ const STORAGE_KEYS = {
   ASSIGNMENTS: 'simpel_assignments',
   SETTINGS: 'simpel_settings',
   CLASS_MEMBERS: 'simpel_class_members',
+  HOMEROOM_ASSIGNMENTS: 'simpel_homeroom_assignments',
 };
 
 function getLocal<T>(key: string, fallback: T): T {
@@ -137,15 +140,33 @@ export const academicService = {
 
   // === DATA KELAS (ROMBEL) ===
   async getClasses(): Promise<ClassRoom[]> {
+    let classesList: ClassRoom[] = [];
     if (isSupabaseConfigured) {
       try {
         const { data, error } = await supabase.from('classes').select('*').order('level', { ascending: true });
-        if (!error && data && data.length > 0) return data as ClassRoom[];
+        if (!error && data && data.length > 0) classesList = data as ClassRoom[];
       } catch (err) {
         console.warn('Supabase getClasses fallback:', err);
       }
     }
-    return getLocal<ClassRoom[]>(STORAGE_KEYS.CLASSES, DEMO_CLASSES);
+    if (classesList.length === 0) {
+      classesList = getLocal<ClassRoom[]>(STORAGE_KEYS.CLASSES, DEMO_CLASSES);
+    }
+
+    // Attach homeroom teacher resolution
+    const homerooms = await this.getHomeroomAssignments();
+    const teachers = await this.getTeachers();
+
+    return classesList.map((c) => {
+      const hr = homerooms.find((h) => h.class_id === c.id);
+      const teacherId = hr ? hr.teacher_id : c.homeroom_teacher_id;
+      const teacher = teachers.find((t) => t.id === teacherId);
+      return {
+        ...c,
+        homeroom_teacher_id: teacherId || null,
+        homeroom_teacher: teacher,
+      };
+    }).sort((a, b) => a.level - b.level);
   },
 
   async createClass(payload: Omit<ClassRoom, 'id' | 'created_at'>): Promise<ClassRoom> {
@@ -165,7 +186,62 @@ export const academicService = {
     const classes = await this.getClasses();
     const updated = [...classes, newClass].sort((a, b) => a.level - b.level);
     setLocal(STORAGE_KEYS.CLASSES, updated);
+
+    if (payload.homeroom_teacher_id) {
+      await this.assignHomeroomTeacher(newClass.id, payload.homeroom_teacher_id);
+    }
+
     return newClass;
+  },
+
+  async updateClass(id: string, payload: Partial<ClassRoom>): Promise<ClassRoom> {
+    const classes = await this.getClasses();
+    const cls = classes.find((c) => c.id === id);
+    if (!cls) throw new Error('Data rombel kelas tidak ditemukan');
+
+    const updatedClass: ClassRoom = {
+      ...cls,
+      ...payload,
+    };
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('classes').update({
+          name: updatedClass.name,
+          level: updatedClass.level,
+          phase: updatedClass.phase,
+          capacity: updatedClass.capacity,
+        }).eq('id', id);
+      } catch (err) {
+        console.warn('Supabase updateClass fallback:', err);
+      }
+    }
+
+    const updated = classes.map((c) => (c.id === id ? updatedClass : c)).sort((a, b) => a.level - b.level);
+    setLocal(STORAGE_KEYS.CLASSES, updated);
+
+    if (payload.homeroom_teacher_id !== undefined) {
+      if (payload.homeroom_teacher_id) {
+        await this.assignHomeroomTeacher(id, payload.homeroom_teacher_id);
+      } else {
+        await this.removeHomeroomTeacher(id);
+      }
+    }
+
+    return updatedClass;
+  },
+
+  async deleteClass(id: string): Promise<void> {
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('classes').delete().eq('id', id);
+      } catch (err) {
+        console.warn('Supabase deleteClass fallback:', err);
+      }
+    }
+    const classes = await this.getClasses();
+    const updated = classes.filter((c) => c.id !== id);
+    setLocal(STORAGE_KEYS.CLASSES, updated);
   },
 
   // === DATA SISWA ===
@@ -265,6 +341,123 @@ export const academicService = {
     const updated = [newTeacher, ...teachers];
     setLocal(STORAGE_KEYS.TEACHERS, updated);
     return newTeacher;
+  },
+
+  async updateTeacher(id: string, payload: Partial<Teacher>): Promise<Teacher> {
+    const teachers = await this.getTeachers();
+    const teacher = teachers.find((t) => t.id === id);
+    if (!teacher) throw new Error('Data tenaga pendidik tidak ditemukan');
+
+    const updatedTeacher: Teacher = {
+      ...teacher,
+      ...payload,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('teachers').update(payload).eq('id', id);
+      } catch (err) {
+        console.warn('Supabase updateTeacher fallback:', err);
+      }
+    }
+
+    const updated = teachers.map((t) => (t.id === id ? updatedTeacher : t));
+    setLocal(STORAGE_KEYS.TEACHERS, updated);
+    return updatedTeacher;
+  },
+
+  async deleteTeacher(id: string): Promise<void> {
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('teachers').delete().eq('id', id);
+      } catch (err) {
+        console.warn('Supabase deleteTeacher fallback:', err);
+      }
+    }
+    const teachers = await this.getTeachers();
+    const updated = teachers.filter((t) => t.id !== id);
+    setLocal(STORAGE_KEYS.TEACHERS, updated);
+  },
+
+  // === PENUGASAN WALI KELAS (HOMEROOM) ===
+  async getHomeroomAssignments(): Promise<HomeroomAssignment[]> {
+    if (isSupabaseConfigured) {
+      try {
+        const { data, error } = await supabase
+          .from('homeroom_assignments')
+          .select('*, teacher:teachers(*), class:classes(*)');
+        if (!error && data && data.length > 0) return data as HomeroomAssignment[];
+      } catch (err) {
+        console.warn('Supabase getHomeroomAssignments fallback:', err);
+      }
+    }
+    return getLocal<HomeroomAssignment[]>(STORAGE_KEYS.HOMEROOM_ASSIGNMENTS, DEMO_HOMEROOM_ASSIGNMENTS);
+  },
+
+  async assignHomeroomTeacher(
+    classId: string,
+    teacherId: string,
+    academicYearId: string = 'ay-2026'
+  ): Promise<HomeroomAssignment> {
+    const current = await this.getHomeroomAssignments();
+    const teachers = await this.getTeachers();
+    const teacher = teachers.find((t) => t.id === teacherId);
+
+    const existingIndex = current.findIndex((h) => h.class_id === classId);
+    let result: HomeroomAssignment;
+
+    if (existingIndex >= 0) {
+      current[existingIndex] = {
+        ...current[existingIndex],
+        teacher_id: teacherId,
+        teacher: teacher || current[existingIndex].teacher,
+        academic_year_id: academicYearId,
+      };
+      result = current[existingIndex];
+    } else {
+      result = {
+        id: `hr-${Date.now()}`,
+        class_id: classId,
+        teacher_id: teacherId,
+        academic_year_id: academicYearId,
+        created_at: new Date().toISOString(),
+        teacher,
+      };
+      current.push(result);
+    }
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('homeroom_assignments').upsert(
+          {
+            class_id: classId,
+            teacher_id: teacherId,
+            academic_year_id: academicYearId,
+          },
+          { onConflict: 'class_id,academic_year_id' }
+        );
+      } catch (err) {
+        console.warn('Supabase assignHomeroomTeacher fallback:', err);
+      }
+    }
+
+    setLocal(STORAGE_KEYS.HOMEROOM_ASSIGNMENTS, current);
+    return result;
+  },
+
+  async removeHomeroomTeacher(classId: string): Promise<void> {
+    const current = await this.getHomeroomAssignments();
+    const updated = current.filter((h) => h.class_id !== classId);
+    setLocal(STORAGE_KEYS.HOMEROOM_ASSIGNMENTS, updated);
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('homeroom_assignments').delete().eq('class_id', classId);
+      } catch (err) {
+        console.warn('Supabase removeHomeroomTeacher fallback:', err);
+      }
+    }
   },
 
   // === DATA MATA PELAJARAN ===

@@ -9,6 +9,7 @@ import {
   FollowupStatus,
 } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { printDocumentDirectly } from '../../services/printService';
 import {
   Award,
   Plus,
@@ -202,7 +203,58 @@ export const SupervisionPage: React.FC = () => {
   };
 
   const handlePrint = () => {
-    window.print();
+    const tableRows = filteredRecords.map((r, idx) => `
+      <tr>
+        <td class="center">${idx + 1}</td>
+        <td><strong>${r.teacher ? `${r.teacher.title_prefix || ''} ${r.teacher.full_name} ${r.teacher.title_suffix || ''}`.trim() : 'Guru Madrasah'}</strong><br><small>NIP: ${r.teacher?.nip || '-'}</small></td>
+        <td>${r.subject ? r.subject.name : 'Mata Pelajaran'}</td>
+        <td class="center">${r.class ? r.class.name : 'Kelas 4'}</td>
+        <td class="center">${r.supervision_date}</td>
+        <td class="center font-bold" style="font-size:11pt;color:#047857;">${r.total_score}</td>
+        <td class="center font-bold">${r.predicate}</td>
+        <td><strong>Catatan:</strong> ${r.general_observation_notes || r.aspect_execution_notes || r.topic || '-'}<br><strong>Rekomendasi:</strong> ${r.recommendations || '-'}</td>
+      </tr>
+    `).join('');
+
+    const contentHtml = `
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 30px;">No</th>
+            <th>Nama Guru yang Disupervisi</th>
+            <th>Mata Pelajaran</th>
+            <th style="width: 65px;">Kelas</th>
+            <th style="width: 80px;">Tanggal</th>
+            <th style="width: 50px;">Nilai</th>
+            <th style="width: 85px;">Predikat</th>
+            <th>Catatan & Arahan Pembinaan</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tableRows}
+        </tbody>
+      </table>
+    `;
+
+    printDocumentDirectly(contentHtml, {
+      title: 'REKAPITULASI HASIL SUPERVISI AKADEMIK & KBM',
+      subtitle: 'Instrumen Observasi Pembelajaran Mendalam & Kurikulum Berbasis Cinta (KBC)',
+      metadata: [
+        { label: 'Tahun Pelajaran', value: '2025/2026 (Semester Ganjil)' },
+        { label: 'Sasaran Guru', value: `${filteredRecords.length} Tenaga Pendidik` },
+        { label: 'Fokus Pendekatan', value: 'Deep Learning & Kurikulum Berbasis Cinta' },
+        { label: 'Tanggal Dokumen', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
+      ],
+      signature: {
+        leftTitle: 'Pengawas Madrasah / Tim Penilai,',
+        leftName: 'Ust. Ahmad Fauzi, S.Pd.I',
+        leftNip: '198503122019031008',
+        rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+        rightTitle: 'Kepala Madrasah,',
+        rightName: 'MUIN, S.Pd.I',
+        rightNip: '197508152005011004',
+      },
+    });
   };
 
   return (

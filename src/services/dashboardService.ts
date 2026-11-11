@@ -6,7 +6,12 @@ import {
   DEMO_CLASSES,
   DEMO_STUDENTS,
   DEMO_TEACHERS,
+  DEMO_USERS,
 } from '../lib/demoData';
+import { academicService } from './academicService';
+import { fetchUsersList } from './userService';
+import { curriculumService } from './curriculumService';
+import { journalService } from './journalService';
 
 export interface AdminDashboardData {
   totalUsers: number;
@@ -136,18 +141,26 @@ export async function fetchAdminDashboardData(): Promise<AdminDashboardData> {
     }
   }
 
-  // Realistic Demo Data
+  // Fallback ke penyimpanan data lokal
+  const [users, teachers, students, classes, settings] = await Promise.all([
+    fetchUsersList(),
+    academicService.getTeachers(),
+    academicService.getStudents(),
+    academicService.getClasses(),
+    academicService.getSettings(),
+  ]);
+
   return {
-    totalUsers: 4,
-    totalTeachers: DEMO_TEACHERS.length,
-    totalStudents: DEMO_STUDENTS.length,
-    totalClasses: DEMO_CLASSES.length,
-    activeAccountsCount: 4,
+    totalUsers: users.length,
+    totalTeachers: teachers.length,
+    totalStudents: students.length,
+    totalClasses: classes.length,
+    activeAccountsCount: users.filter((u) => u.is_active).length,
     academicYearName: DEMO_ACADEMIC_YEAR.name,
     semesterName: DEMO_SEMESTER.semester_type,
-    isReportCardLocked: DEMO_SYSTEM_SETTINGS.is_report_card_locked,
-    schoolName: DEMO_SYSTEM_SETTINGS.school_name,
-    principalName: DEMO_SYSTEM_SETTINGS.principal_name,
+    isReportCardLocked: settings.is_report_card_locked,
+    schoolName: settings.school_name,
+    principalName: settings.principal_name,
   };
 }
 
@@ -212,51 +225,42 @@ export async function fetchPrincipalDashboardData(): Promise<PrincipalDashboardD
     }
   }
 
-  // Demo Fallback
+  // Fallback ke penyimpanan data lokal
+  const [teachers, students, classes, docs, journals] = await Promise.all([
+    academicService.getTeachers(),
+    academicService.getStudents(),
+    academicService.getClasses(),
+    curriculumService.getDocuments(),
+    journalService.getJournals(),
+  ]);
+
+  const pendingDocs = docs.filter((d) => d.status === 'Diajukan');
+  const approvedDocs = docs.filter((d) => d.status === 'Disetujui');
+
   return {
-    totalTeachers: DEMO_TEACHERS.length,
-    totalStudents: DEMO_STUDENTS.length,
-    totalClasses: DEMO_CLASSES.length,
-    pendingDocumentsCount: 2,
-    approvedDocumentsCount: 6,
-    totalJournalsToday: 3,
-    attendanceRateToday: 97.4,
-    pendingDocuments: [
-      {
-        id: 'doc-demo-1',
-        title: 'Modul Ajar Fikih Bab Thaharah [DEMO]',
-        documentType: 'Modul Ajar',
-        teacherName: 'Ust. Ahmad Fauzi, S.Pd.I',
-        submissionDate: '2026-11-03T10:00:00+07:00',
-        driveUrl: 'https://drive.google.com/drive/folders/demo-mi-alihsan',
-      },
-      {
-        id: 'doc-demo-2',
-        title: 'Program Semester IPAS Fase B [DEMO]',
-        documentType: 'Prosem',
-        teacherName: 'Ust. Ahmad Fauzi, S.Pd.I',
-        submissionDate: '2026-11-04T08:30:00+07:00',
-        driveUrl: 'https://drive.google.com/drive/folders/demo-mi-alihsan',
-      },
-    ],
-    recentJournals: [
-      {
-        id: 'jrn-demo-1',
-        teacherName: 'Ust. Ahmad Fauzi, S.Pd.I',
-        subjectName: 'Fikih',
-        className: 'Kelas 4',
-        date: '2026-11-04',
-        topic: 'Praktik Bersuci dari Najis dengan Pendekatan Berbasis Kasih Sayang',
-      },
-      {
-        id: 'jrn-demo-2',
-        teacherName: 'Ust. Muhammad Ridwan, S.Pd.',
-        subjectName: 'PJOK',
-        className: 'Kelas 4',
-        date: '2026-11-04',
-        topic: 'Kebugaran Jasmani dan Pembentukan Karakter Gotong Royong',
-      },
-    ],
+    totalTeachers: teachers.length,
+    totalStudents: students.length,
+    totalClasses: classes.length,
+    pendingDocumentsCount: pendingDocs.length,
+    approvedDocumentsCount: approvedDocs.length,
+    totalJournalsToday: journals.length,
+    attendanceRateToday: 0,
+    pendingDocuments: pendingDocs.map((d) => ({
+      id: d.id,
+      title: d.title,
+      documentType: d.document_type,
+      teacherName: d.teacher?.full_name || 'Guru Madrasah',
+      submissionDate: d.submission_date || d.created_at,
+      driveUrl: d.google_drive_url,
+    })),
+    recentJournals: journals.slice(0, 5).map((j) => ({
+      id: j.id,
+      teacherName: j.assignment?.teacher?.full_name || 'Guru',
+      subjectName: j.assignment?.subject?.name || 'Mata Pelajaran',
+      className: j.assignment?.class?.name || 'Kelas',
+      date: j.date,
+      topic: j.topic,
+    })),
   };
 }
 
@@ -321,38 +325,19 @@ export async function fetchTeacherDashboardData(teacherId?: string | null): Prom
     }
   }
 
-  // Demo fallback
+  // Fallback ketika belum ada penugasan guru
   return {
-    teacherName: 'Ust. Ahmad Fauzi, S.Pd.I',
-    nip: '198204152010011015',
-    specialization: 'Guru Kelas 4 & PAI',
-    assignedClassesCount: 3,
-    totalSubjectsTaught: 3,
-    assignedClasses: [
-      { assignmentId: 'asg-1', className: 'Kelas 4', subjectName: 'Fikih', subjectCode: 'FIK', phase: 'B' },
-      { assignmentId: 'asg-2', className: 'Kelas 4', subjectName: 'Al-Qur’an Hadis', subjectCode: 'QH', phase: 'B' },
-      { assignmentId: 'asg-3', className: 'Kelas 4', subjectName: 'Bahasa Indonesia', subjectCode: 'BIN', phase: 'B' },
-    ],
-    submittedDocsCount: 4,
-    approvedDocsCount: 3,
+    teacherName: 'Guru Madrasah',
+    nip: '-',
+    specialization: 'Pendidik',
+    assignedClassesCount: 0,
+    totalSubjectsTaught: 0,
+    assignedClasses: [],
+    submittedDocsCount: 0,
+    approvedDocsCount: 0,
     revisionDocsCount: 0,
-    journalsCount: 18,
-    recentJournals: [
-      {
-        id: 'jrn-1',
-        date: '2026-11-04',
-        className: 'Kelas 4',
-        subjectName: 'Fikih',
-        topic: 'Praktik Bersuci dan Thaharah',
-      },
-      {
-        id: 'jrn-2',
-        date: '2026-11-02',
-        className: 'Kelas 4',
-        subjectName: 'Al-Qur’an Hadis',
-        topic: 'Kajian Surah Al-Ma’un dan Kepedulian Sosial',
-      },
-    ],
+    journalsCount: 0,
+    recentJournals: [],
   };
 }
 
@@ -380,20 +365,16 @@ export async function fetchHomeroomDashboardData(homeroomClassId?: string | null
           className: classRes.data?.name || 'Kelas Binaan',
           phase: classRes.data?.phase || 'B',
           totalStudents: students.length,
-          homeroomTeacherName: 'Ust. Ahmad Fauzi, S.Pd.I',
+          homeroomTeacherName: 'Wali Kelas',
           students,
           attendanceSummary: {
-            hadirCount: students.length * 18,
-            sakitCount: 2,
-            izinCount: 1,
+            hadirCount: 0,
+            sakitCount: 0,
+            izinCount: 0,
             alpaCount: 0,
-            attendancePercentage: 97.8,
+            attendancePercentage: 0,
           },
-          gradeCompletenessStatus: [
-            { subjectName: 'Al-Qur’an Hadis', teacherName: 'Ust. Ahmad Fauzi', isComplete: true, gradedStudentsCount: students.length, totalStudents: students.length },
-            { subjectName: 'Fikih', teacherName: 'Ust. Ahmad Fauzi', isComplete: true, gradedStudentsCount: students.length, totalStudents: students.length },
-            { subjectName: 'PJOK', teacherName: 'Ust. Muhammad Ridwan', isComplete: false, gradedStudentsCount: Math.max(0, students.length - 1), totalStudents: students.length },
-          ],
+          gradeCompletenessStatus: [],
         };
       }
     } catch (err) {
@@ -401,32 +382,20 @@ export async function fetchHomeroomDashboardData(homeroomClassId?: string | null
     }
   }
 
-  // Demo Fallback
+  // Fallback ketika belum ada rombel aktif
   return {
-    className: 'Kelas 4',
-    phase: 'B',
-    totalStudents: DEMO_STUDENTS.length,
-    homeroomTeacherName: 'Ust. Ahmad Fauzi, S.Pd.I',
-    students: DEMO_STUDENTS.map((s) => ({
-      id: s.id,
-      nis: s.nis,
-      fullName: s.full_name,
-      gender: s.gender,
-      parentPhone: s.parent_phone,
-    })),
+    className: 'Belum Ada Rombel Ditugaskan',
+    phase: '-',
+    totalStudents: 0,
+    homeroomTeacherName: '-',
+    students: [],
     attendanceSummary: {
-      hadirCount: 72,
-      sakitCount: 2,
-      izinCount: 1,
+      hadirCount: 0,
+      sakitCount: 0,
+      izinCount: 0,
       alpaCount: 0,
-      attendancePercentage: 96.0,
+      attendancePercentage: 0,
     },
-    gradeCompletenessStatus: [
-      { subjectName: 'Al-Qur’an Hadis', teacherName: 'Ust. Ahmad Fauzi, S.Pd.I', isComplete: true, gradedStudentsCount: 4, totalStudents: 4 },
-      { subjectName: 'Akidah Akhlak', teacherName: 'Drs. H. Ahmad Ihsan', isComplete: true, gradedStudentsCount: 4, totalStudents: 4 },
-      { subjectName: 'Fikih', teacherName: 'Ust. Ahmad Fauzi, S.Pd.I', isComplete: true, gradedStudentsCount: 4, totalStudents: 4 },
-      { subjectName: 'PJOK', teacherName: 'Ust. Muhammad Ridwan, S.Pd.', isComplete: false, gradedStudentsCount: 3, totalStudents: 4 },
-      { subjectName: 'Bahasa Indonesia', teacherName: 'Ust. Ahmad Fauzi, S.Pd.I', isComplete: true, gradedStudentsCount: 4, totalStudents: 4 },
-    ],
+    gradeCompletenessStatus: [],
   };
 }

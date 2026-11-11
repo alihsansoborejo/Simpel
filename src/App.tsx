@@ -26,6 +26,7 @@ import { StudentGuidancePage } from './features/guidance/StudentGuidancePage';
 import { SupervisionPage } from './features/supervision/SupervisionPage';
 import { CurriculumManagementPage } from './features/curriculum/CurriculumManagementPage';
 import { EvaluationManagementPage } from './features/assessment/EvaluationManagementPage';
+import { GradeLedgerPage } from './features/assessment/GradeLedgerPage';
 import { AIAssistantPage } from './features/ai/AIAssistantPage';
 
 // Modul Tahap 8: Implementasi, Migrasi Data, Identitas, & Uji Coba Operasional
@@ -250,9 +251,10 @@ const MainAppContent: React.FC = () => {
       case 'presensi':
       case 'monitoring-kbm':
       case 'rekap-presensi-kelas':
-        return <AttendancePage />;
+        return <AttendancePage onNavigate={setActiveView} />;
 
       case 'jurnal-mengajar':
+      case 'jurnal-kbm':
         return <TeachingJournalPage onNavigate={setActiveView} />;
 
       case 'bimbingan-siswa':
@@ -263,18 +265,13 @@ const MainAppContent: React.FC = () => {
       case 'supervisi-guru':
         return <SupervisionPage />;
 
+      // === LEGER NILAI & PENGOLAHAN RAPOR MADRASAH ===
       case 'pengolahan-rapor':
       case 'pengesahan-rapor':
+      case 'leger-nilai':
+      case 'monitoring-nilai-mapel':
       case 'catatan-perkembangan':
-        return (
-          <ModulePlaceholder
-            title="Pengolahan & Pengesahan Rapor Madrasah"
-            stageName="Tahap 8"
-            description="Kompilasi nilai akhir seluruh mapel, rumusan deskripsi capaian otomatis, pratinjau rapor, dan cetak PDF."
-            icon={FileSpreadsheet}
-            onBack={() => setActiveView('dashboard')}
-          />
-        );
+        return <GradeLedgerPage onNavigate={setActiveView} />;
 
       case 'asisten-ai':
       case 'asisten-ai-modul':

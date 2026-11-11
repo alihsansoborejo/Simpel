@@ -1,6 +1,7 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 import { Profile, UserRole, ActivityLog, Teacher } from '../types/database.types';
 import { DEMO_USERS, DEMO_TEACHERS } from '../lib/demoData';
+import { academicService } from './academicService';
 
 export interface UserListItem {
   id: string;
@@ -171,7 +172,8 @@ export async function fetchTeachersWithoutAccount(): Promise<Teacher[]> {
     }
   }
 
-  return DEMO_TEACHERS.filter((t) => !getDemoUsers().some((u) => u.teacher_info?.id === t.id));
+  const allTeachers = await academicService.getTeachers();
+  return allTeachers.filter((t) => !getDemoUsers().some((u) => u.teacher_info?.id === t.id));
 }
 
 export async function createUserWithRoles(data: CreateUserData, adminId: string): Promise<UserListItem> {

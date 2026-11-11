@@ -3,6 +3,7 @@ import { assessmentService } from '../../services/assessmentService';
 import { academicService } from '../../services/academicService';
 import { Assessment, Grade, Student, AssessmentType, TeachingAssignment } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { printDocumentDirectly } from '../../services/printService';
 import {
   Award,
   Plus,
@@ -12,9 +13,15 @@ import {
   BookOpen,
   Calendar,
   Layers,
+  Printer,
+  FileSpreadsheet,
 } from 'lucide-react';
 
-export const GradesPage: React.FC = () => {
+interface GradesPageProps {
+  onNavigate?: (view: string) => void;
+}
+
+export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
   const { user } = useAuth();
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
@@ -159,6 +166,63 @@ export const GradesPage: React.FC = () => {
   const currentAsm = assessments.find((a) => a.id === selectedAssessmentId);
   const currentKktp = currentAsm ? Number(currentAsm.kktp) : 75;
 
+  const handlePrintDocument = () => {
+    if (!currentAsm) return;
+    const tableRows = students.map((s, idx) => {
+      const g = grades.find((gr) => gr.student_id === s.id);
+      const score = g ? g.score : 0;
+      const passed = score >= currentKktp;
+      return `
+        <tr>
+          <td class="center">${idx + 1}</td>
+          <td><strong>${s.full_name}</strong></td>
+          <td class="center font-mono">${s.nis} / ${s.nisn || '-'}</td>
+          <td class="center font-bold" style="font-size:11pt;color:${passed ? '#047857' : '#e11d48'};">${score}</td>
+          <td class="center font-bold" style="color:${passed ? '#047857' : '#e11d48'};">${passed ? 'TUNTAS' : 'REMEDIAL'}</td>
+          <td>${g?.feedback || '-'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    const contentHtml = `
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 35px;">No</th>
+            <th>Nama Lengkap Peserta Didik</th>
+            <th style="width: 130px;">NIS / NISN</th>
+            <th style="width: 70px;">Nilai</th>
+            <th style="width: 100px;">Ketuntasan KKTP</th>
+            <th>Catatan Umpan Balik Guru</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tableRows}
+        </tbody>
+      </table>
+    `;
+
+    printDocumentDirectly(contentHtml, {
+      title: `LEMBAR DAFTAR NILAI & KETUNTASAN SISWA`,
+      subtitle: `${currentAsm.title} - Ambang KKTP: ${currentKktp}`,
+      metadata: [
+        { label: 'Instrumen Asesmen', value: currentAsm.title },
+        { label: 'Tipe Asesmen', value: currentAsm.assessment_type.replace('_', ' ') },
+        { label: 'Ambang Batas KKTP', value: String(currentKktp) },
+        { label: 'Tanggal Pelaksanaan', value: currentAsm.assessment_date },
+      ],
+      signature: {
+        leftTitle: 'Guru Pengampu Mata Pelajaran,',
+        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
+        leftNip: '198503122019031008',
+        rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+        rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
+        rightName: 'MUIN, S.Pd.I',
+        rightNip: '197508152005011004',
+      },
+    });
+  };
+
   return (
     <div className="space-y-6 max-w-6xl">
       {/* Header */}
@@ -169,7 +233,27 @@ export const GradesPage: React.FC = () => {
             Penilaian formatif, sumatif materi, dan perbandingan langsung terhadap Kriteria Ketercapaian Tujuan Pembelajaran (KKTP).
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {onNavigate && (
+            <button
+              onClick={() => onNavigate('leger-nilai')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold rounded-lg shadow-xs transition-colors"
+              title="Lihat Rekapitulasi Leger Nilai TP/LM & Rapor"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-emerald-950" />
+              <span>Buka Leger Nilai Rapor</span>
+            </button>
+          )}
+          {currentAsm && (
+            <button
+              onClick={handlePrintDocument}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-xs transition-colors"
+              title="Cetak format cetak resmi daftar nilai lengkap kop madrasah"
+            >
+              <Printer className="w-4 h-4 text-emerald-800" />
+              <span>Cetak PDF Siap Cetak</span>
+            </button>
+          )}
           <button
             onClick={() => setShowAddModal(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-xs transition-colors"

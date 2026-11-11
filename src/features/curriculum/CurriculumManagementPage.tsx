@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
+import { printDocumentDirectly } from '../../services/printService';
 import {
   CapaianPembelajaranItem,
   TujuanPembelajaranItem,
@@ -171,7 +172,125 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
 
   // Cetak Dokumen
   const handlePrint = () => {
-    window.print();
+    const currentSubjectName = selectedSubject === 'sbj-ind' ? 'Bahasa Indonesia' : 'IPAS';
+    let title = 'PERANGKAT PEMBELAJARAN MADRASAH';
+    let subtitle = `${currentSubjectName} - Kelas ${selectedClass}`;
+    let contentHtml = '';
+
+    if (activeTab === 'cp') {
+      title = 'DOKUMEN CAPAIAN PEMBELAJARAN (CP)';
+      contentHtml = `
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 35px;">No</th>
+              <th style="width: 140px;">Elemen Capaian</th>
+              <th>Deskripsi Capaian Pembelajaran</th>
+              <th style="width: 70px;">Fase</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredCP.map((item, idx) => `
+              <tr>
+                <td class="center">${idx + 1}</td>
+                <td><strong>${item.element}</strong></td>
+                <td>${item.description}</td>
+                <td class="center font-bold">Fase ${item.phase}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } else if (activeTab === 'tp') {
+      title = 'DOKUMEN TUJUAN PEMBELAJARAN (TP)';
+      contentHtml = `
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 35px;">No</th>
+              <th style="width: 80px;">Kode TP</th>
+              <th style="width: 160px;">Lingkup Materi</th>
+              <th>Rumusan Tujuan Pembelajaran (TP)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredTP.map((item, idx) => `
+              <tr>
+                <td class="center">${idx + 1}</td>
+                <td class="center font-mono font-bold">${item.code}</td>
+                <td><strong>${item.scope_of_material}</strong></td>
+                <td>${item.description}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } else if (activeTab === 'atp') {
+      title = 'ALUR TUJUAN PEMBELAJARAN (ATP)';
+      contentHtml = `
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 55px;">Urutan</th>
+              <th style="width: 90px;">Kode TP</th>
+              <th>Alur Tujuan Pembelajaran & Aktivitas</th>
+              <th style="width: 80px;">Alokasi JP</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredATP.map((item) => `
+              <tr>
+                <td class="center font-bold">Tahap ${item.sequence_order}</td>
+                <td class="center font-mono font-bold">${item.tp_codes ? item.tp_codes.join(', ') : item.stage_name}</td>
+                <td><strong>${item.chapter_title}</strong>: ${item.material_summary}</td>
+                <td class="center font-bold">${item.allocated_hours} JP</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } else if (activeTab === 'modul-ajar') {
+      title = 'MODUL AJAR PEMBELAJARAN MENDALAM';
+      contentHtml = filteredModul.map((m, idx) => `
+        <div style="margin-bottom: 24px; border: 1px solid #cbd5e1; padding: 12px; page-break-inside: avoid;">
+          <h3 style="margin: 0 0 8px 0; color: #047857;">${idx + 1}. ${m.chapter_title} (${m.allocated_meetings})</h3>
+          <p style="margin: 2px 0;"><strong>Topik:</strong> ${m.topic}</p>
+          <p style="margin: 2px 0;"><strong>Pendekatan:</strong> <span style="color:#047857;font-weight:bold;">${m.deep_learning_approach}</span></p>
+          <div style="margin-top: 8px;"><strong>Langkah Pembelajaran Mendalam:</strong></div>
+          <div style="margin-top: 4px; padding: 6px; background: #f8fafc; border-left: 3px solid #047857; font-size: 9.5pt;">${(m.learning_activities?.core_deep_learning || m.learning_activities?.introduction || '').replace(/\n/g, '<br>')}</div>
+        </div>
+      `).join('');
+    } else if (activeTab === 'lkpd') {
+      title = 'LEMBAR KERJA PESERTA DIDIK (LKPD)';
+      contentHtml = filteredLKPD.map((l, idx) => `
+        <div style="margin-bottom: 24px; border: 1px solid #cbd5e1; padding: 12px; page-break-inside: avoid;">
+          <h3 style="margin: 0 0 6px 0; color: #047857;">${idx + 1}. ${l.title} (${l.activity_type})</h3>
+          <p style="margin: 2px 0;"><strong>Materi / Bab:</strong> ${l.chapter_topic}</p>
+          <div style="margin-top: 8px;"><strong>Instruksi & Lembar Tugas:</strong></div>
+          <div style="margin-top: 4px; padding: 8px; background: #f8fafc; border: 1px dashed #94a3b8; font-size: 9.5pt;">${(l.instructions || '').replace(/\n/g, '<br>')}</div>
+        </div>
+      `).join('');
+    }
+
+    printDocumentDirectly(contentHtml, {
+      title,
+      subtitle: `${currentSubjectName} - Kelas ${selectedClass} (Tahun Pelajaran 2025/2026)`,
+      metadata: [
+        { label: 'Mata Pelajaran', value: currentSubjectName },
+        { label: 'Tingkat Kelas', value: `Kelas ${selectedClass}` },
+        { label: 'Kurikulum Acuan', value: 'Kurikulum Merdeka (KMA 450/2024) - KBC' },
+        { label: 'Tanggal Dokumen', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
+      ],
+      signature: {
+        leftTitle: 'Guru Pengampu Mata Pelajaran,',
+        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
+        leftNip: '198503122019031008',
+        rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+        rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
+        rightName: 'MUIN, S.Pd.I',
+        rightNip: '197508152005011004',
+      },
+    });
   };
 
   // Handler Submit Form

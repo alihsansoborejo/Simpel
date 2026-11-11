@@ -305,48 +305,35 @@ export const aiService = {
     URL.revokeObjectURL(url);
   },
 
-  exportToPrintPDF(contentElementId: string) {
+  exportToPrintPDF(contentElementId: string, customTitle?: string) {
     const el = document.getElementById(contentElementId);
     if (!el) {
       window.print();
       return;
     }
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) {
+
+    import('./printService').then(({ printDocumentDirectly }) => {
+      printDocumentDirectly(el.innerHTML, {
+        title: customTitle || 'DOKUMEN HASIL PERANCANGAN AI PEMBELAJARAN',
+        subtitle: 'Kurikulum Berbasis Cinta (KBC) & Pembelajaran Mendalam (Deep Learning)',
+        metadata: [
+          { label: 'Model AI', value: 'Google Gemini 3.8 Flash' },
+          { label: 'Tahun Ajaran', value: '2025/2026 (Semester Ganjil)' },
+          { label: 'Tanggal Penyusunan', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
+        ],
+        signature: {
+          leftTitle: 'Penyusun / Guru Pengampu,',
+          leftName: 'Ust. Ahmad Fauzi, S.Pd.I',
+          leftNip: '198503122019031008',
+          rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+          rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
+          rightName: 'MUIN, S.Pd.I',
+          rightNip: '197508152005011004',
+        },
+      });
+    }).catch(() => {
       window.print();
-      return;
-    }
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>Cetak Dokumen Pembelajaran SIMPEL</title>
-          <style>
-            body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; color: #1e293b; font-size: 12px; }
-            table { width: 100%; border-collapse: collapse; margin: 12px 0; }
-            th, td { border: 1px solid #cbd5e1; padding: 6px 10px; text-align: left; }
-            th { background: #f8fafc; font-weight: bold; }
-            h1, h2, h3 { color: #047857; }
-            @media print {
-              body { padding: 0; }
-              button { display: none; }
-            }
-          </style>
-        </head>
-        <body>
-          <div style="text-align: center; border-bottom: 2px solid #047857; padding-bottom: 8px; margin-bottom: 16px;">
-            <h2 style="margin: 0; color: #047857;">MI MA'ARIF AL IHSAN SOBOREJO</h2>
-            <p style="margin: 2px 0; font-size: 11px; color: #64748b;">Dokumen Kurikulum Pembelajaran Terintegrasi AI SIMPEL</p>
-          </div>
-          ${el.innerHTML}
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
-    printWindow.focus();
-    setTimeout(() => {
-      printWindow.print();
-      printWindow.close();
-    }, 400);
+    });
   },
 
   async copyText(text: string): Promise<boolean> {

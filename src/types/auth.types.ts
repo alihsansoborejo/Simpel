@@ -7,6 +7,7 @@ export interface AuthUser {
   roles: UserRole[];
   activeRole: UserRole;
   teacherId?: string | null;
+  homeroomClassId?: string | null;
 }
 
 export interface AuthState {

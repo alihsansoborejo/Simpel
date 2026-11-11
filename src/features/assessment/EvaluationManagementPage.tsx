@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
+import { printDocumentDirectly } from '../../services/printService';
 import {
   KisiKisiItem,
   SoalAsesmenItem,
@@ -204,7 +205,76 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
   };
 
   const handlePrint = () => {
-    window.print();
+    const scopeLabel = currentScopeConfig ? currentScopeConfig.label : selectedScope;
+    const currentSubjectName = selectedSubject === 'sbj-ind' ? 'Bahasa Indonesia' : 'IPAS';
+    let title = `PERANGKAT EVALUASI & ASESMEN (${scopeLabel})`;
+    let contentHtml = '';
+
+    if (activeTab === 'kisi-kisi') {
+      title = `KISI-KISI ASESMEN PEMBELAJARAN (${scopeLabel})`;
+      contentHtml = `
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 35px;">No</th>
+              <th style="width: 80px;">Bentuk</th>
+              <th style="width: 80px;">Level Kognitif</th>
+              <th>Materi Pokok & Indikator Soal</th>
+              <th style="width: 60px;">No Soal</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredKisi.map((k, idx) => `
+              <tr>
+                <td class="center">${idx + 1}</td>
+                <td class="center font-bold">${k.question_type}</td>
+                <td class="center font-bold" style="color:#047857;">${k.cognitive_level}</td>
+                <td><strong>Materi:</strong> ${k.material_topic}<br><strong>Indikator:</strong> ${k.indicator}</td>
+                <td class="center font-bold font-mono">${k.question_numbers}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } else if (activeTab === 'soal-asesmen') {
+      title = `NASKAH SOAL ASESMEN SUMATIF (${scopeLabel})`;
+      contentHtml = filteredSoal.map((s, idx) => `
+        <div style="margin-bottom: 16px; border-bottom: 1px dashed #cbd5e1; padding-bottom: 10px; page-break-inside: avoid;">
+          <p style="margin: 0 0 6px 0;"><strong>${s.question_number || idx + 1}.</strong> ${s.question_text}</p>
+          ${s.options && s.options.length > 0 ? `
+            <div style="margin-left: 18px; font-size: 10pt;">
+              ${s.options.map((opt, oIdx) => `<div>${String.fromCharCode(65 + oIdx)}. ${opt}</div>`).join('')}
+            </div>
+          ` : ''}
+          <div style="margin-top: 6px; font-size: 9pt; color: #475569;">
+            <em>Kunci Jawaban: <strong>${s.correct_answer || '-'}</strong> | Bobot Skor: ${s.score_points || 1} poin</em>
+          </div>
+        </div>
+      `).join('');
+    } else {
+      window.print();
+      return;
+    }
+
+    printDocumentDirectly(contentHtml, {
+      title,
+      subtitle: `${currentSubjectName} - Kelas ${selectedClass} (${scopeLabel})`,
+      metadata: [
+        { label: 'Mata Pelajaran', value: currentSubjectName },
+        { label: 'Tingkat Rombel', value: `Kelas ${selectedClass}` },
+        { label: 'Lingkup Materi', value: scopeLabel },
+        { label: 'Tahun Pelajaran', value: '2025/2026 (Semester Ganjil)' },
+      ],
+      signature: {
+        leftTitle: 'Guru Pengampu / Penyusun Soal,',
+        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
+        leftNip: '198503122019031008',
+        rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+        rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
+        rightName: 'MUIN, S.Pd.I',
+        rightNip: '197508152005011004',
+      },
+    });
   };
 
   const handleSubmitForm = (e: React.FormEvent) => {
@@ -786,7 +856,7 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
           ========================================================================= */}
       {activeTab === 'asesmen-nilai' && (
         <div className="space-y-4">
-          <GradesPage />
+          <GradesPage onNavigate={onNavigate} />
         </div>
       )}
 

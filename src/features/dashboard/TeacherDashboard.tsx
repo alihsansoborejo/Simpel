@@ -145,13 +145,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            onClick={() => onNavigate('presensi')}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-700/80 hover:bg-emerald-600 transition-colors border border-emerald-500/30"
-          >
-            <CalendarCheck className="w-4 h-4 text-amber-300" />
-            <span>Presensi Hari Ini</span>
-          </button>
+          {user?.roles?.includes('wali_kelas') ? (
+            <button
+              onClick={() => onNavigate('presensi')}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-700/80 hover:bg-emerald-600 transition-colors border border-emerald-500/30"
+            >
+              <CalendarCheck className="w-4 h-4 text-amber-300" />
+              <span>Presensi Rombel Binaan</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => onNavigate('jurnal-mengajar')}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-700/80 hover:bg-emerald-600 transition-colors border border-emerald-500/30"
+            >
+              <ClipboardList className="w-4 h-4 text-amber-300" />
+              <span>Jurnal Mengajar Hari Ini</span>
+            </button>
+          )}
           <button
             onClick={() => onNavigate('asisten-ai')}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-900 bg-amber-300 hover:bg-amber-400 transition-colors shadow-xs"
@@ -163,35 +173,55 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
       </div>
 
       {/* =========================================================================
-          1. PRESENSI SISWA HARIAN (SECTION STRIP)
+          1. PRESENSI / JURNAL KBM STRIP
           ========================================================================= */}
       <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-xs">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start gap-3">
             <div className="p-2.5 rounded-lg bg-emerald-50 text-emerald-800 shrink-0 mt-0.5">
-              <CalendarCheck className="w-5 h-5 text-emerald-700" />
+              {user?.roles?.includes('wali_kelas') ? (
+                <CalendarCheck className="w-5 h-5 text-emerald-700" />
+              ) : (
+                <ClipboardList className="w-5 h-5 text-emerald-700" />
+              )}
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="font-bold text-sm text-slate-900">Presensi Siswa Harian</h3>
+                <h3 className="font-bold text-sm text-slate-900">
+                  {user?.roles?.includes('wali_kelas')
+                    ? 'Presensi Siswa Rombel Binaan'
+                    : 'Jurnal Mengajar & Presensi KBM'}
+                </h3>
                 <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-100 text-emerald-800">
-                  Aktif Hari Ini
+                  {user?.roles?.includes('wali_kelas') ? 'Wali Kelas' : 'Guru Pengampu'}
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                Rombongan Belajar: <strong className="text-slate-800">Kelas 4 (Fase B)</strong> · Total 28 Siswa Terdaftar
+                {user?.roles?.includes('wali_kelas')
+                  ? 'Pencatatan harian kehadiran siswa khusus rombel binaan Anda untuk akumulasi otomatis buku rapor.'
+                  : 'Catat keterlaksanaan modul ajar, aktivitas Deep Learning, dan catatan presensi siswa pada jam tatap muka.'}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 self-end sm:self-center">
-            <button
-              onClick={() => onNavigate('presensi')}
-              className="px-3.5 py-2 rounded-lg bg-emerald-700 text-white font-semibold text-xs hover:bg-emerald-800 transition-colors flex items-center gap-1.5 shadow-xs"
-            >
-              <span>Buka Presensi Kelas</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+            {user?.roles?.includes('wali_kelas') ? (
+              <button
+                onClick={() => onNavigate('presensi')}
+                className="px-3.5 py-2 rounded-lg bg-emerald-700 text-white font-semibold text-xs hover:bg-emerald-800 transition-colors flex items-center gap-1.5 shadow-xs"
+              >
+                <span>Buka Presensi Rombel</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            ) : (
+              <button
+                onClick={() => onNavigate('jurnal-mengajar')}
+                className="px-3.5 py-2 rounded-lg bg-emerald-700 text-white font-semibold text-xs hover:bg-emerald-800 transition-colors flex items-center gap-1.5 shadow-xs"
+              >
+                <span>Buka Jurnal Mengajar</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
       </div>

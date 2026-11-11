@@ -237,77 +237,37 @@ export const LoginPage: React.FC = () => {
               </button>
             </form>
 
-            {/* Quick Demo Switcher (Bila menguji tanpa kredensial) */}
+            {/* Informasi Akses Administrator */}
             <div className="mt-8 pt-6 border-t border-slate-200">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-[11px] font-semibold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                  <KeyRound className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Masuk Cepat 1-Klik (Uji Coba Demo)</span>
-                </span>
-                <span className="text-[10px] text-emerald-700 font-medium">Langsung Aktif</span>
+              <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/70 text-left flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-emerald-800 text-white shrink-0 mt-0.5">
+                  <KeyRound className="w-4 h-4 text-amber-300" />
+                </div>
+                <div className="text-[11px] text-slate-700 flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-900">Akun Tunggal Administrator</span>
+                    <span className="px-2 py-0.5 rounded bg-emerald-800 text-white text-[10px] font-semibold">Tersedia</span>
+                  </div>
+                  <p className="mt-1 font-mono font-medium text-emerald-900 text-xs">
+                    alihsansoborejo@gmail.com
+                  </p>
+                  <p className="mt-1 text-slate-600 text-[11px]">
+                    Sandi: <span className="font-mono font-semibold text-slate-800">AlIhsan2026!</span>
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => handleDirectDemoLogin('admin')}
+                    className="mt-2.5 w-full py-1.5 px-3 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 shadow-xs"
+                  >
+                    <span>Masuk Langsung sebagai Administrator</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
-                <button
-                  type="button"
-                  onClick={() => handleDirectDemoLogin('admin')}
-                  className="p-2.5 text-left rounded-xl border border-emerald-200 bg-emerald-50/50 hover:bg-emerald-100/60 hover:border-emerald-600 transition-all flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900">1. Admin Madrasah</span>
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-800 text-white font-semibold">1-Klik</span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 font-mono mt-0.5 truncate">alihsansoborejo@gmail.com</p>
-                  <p className="text-[10px] text-emerald-800 mt-1 font-medium">Akses kelola akun & master data</p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleDirectDemoLogin('kamad')}
-                  className="p-2.5 text-left rounded-xl border border-purple-200 bg-purple-50/40 hover:bg-purple-100/60 hover:border-purple-600 transition-all flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900">2. Kepala Madrasah</span>
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-800 text-white font-semibold">1-Klik</span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 font-mono mt-0.5 truncate">kamad@alihsan.sch.id</p>
-                  <p className="text-[10px] text-purple-800 mt-1 font-medium">Supervisi dokumen Drive & KBM</p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleDirectDemoLogin('guru')}
-                  className="p-2.5 text-left rounded-xl border border-amber-200 bg-amber-50/50 hover:bg-amber-100/60 hover:border-amber-600 transition-all flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900">3. Guru & Wali Kelas</span>
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-700 text-white font-semibold">Multi-Peran</span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 font-mono mt-0.5 truncate">guru@alihsan.sch.id</p>
-                  <p className="text-[10px] text-amber-800 mt-1 font-medium">Beralih Dasbor Guru & Wali Kelas 4</p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleDirectDemoLogin('pjok')}
-                  className="p-2.5 text-left rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 hover:border-slate-400 transition-all flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900">4. Guru Pengampu</span>
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-700 text-white font-semibold">1-Klik</span>
-                  </div>
-                  <p className="text-[10px] text-slate-500 font-mono mt-0.5 truncate">guru.pjok@alihsan.sch.id</p>
-                  <p className="text-[10px] text-slate-600 mt-1 font-medium">Jurnal, nilai & presensi mapel</p>
-                </button>
-              </div>
-
-              <div className="mt-3 p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-center text-[11px] text-slate-600">
-                <span>Atau masuk manual menggunakan email Anda: </span>
-                <span className="font-mono font-bold text-emerald-800">alihsansoborejo@gmail.com</span>
-                <span> (Sandi: </span>
-                <span className="font-mono font-bold text-emerald-800">AlIhsan2026!</span>
-                <span>)</span>
-              </div>
+              <p className="mt-3 text-center text-[11px] text-slate-500">
+                Seluruh data dummy telah dikosongkan. Akun Guru, Kepala Madrasah, dan Rombel dapat dikelola atau diimpor melalui panel Administrator.
+              </p>
             </div>
           </div>
 

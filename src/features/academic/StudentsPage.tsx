@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
-import { Student, ClassRoom } from '../../types/database.types';
+import { Student, ClassRoom, ClassMember } from '../../types/database.types';
+import { printDocumentDirectly } from '../../services/printService';
 import {
   Users,
   Search,
@@ -12,11 +13,14 @@ import {
   CheckCircle,
   AlertCircle,
   FileSpreadsheet,
+  Printer,
+  School,
 } from 'lucide-react';
 
 export const StudentsPage: React.FC = () => {
   const [students, setStudents] = useState<Student[]>([]);
   const [classes, setClasses] = useState<ClassRoom[]>([]);
+  const [classMembers, setClassMembers] = useState<ClassMember[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('all');
@@ -29,6 +33,7 @@ export const StudentsPage: React.FC = () => {
   const [nisn, setNisn] = useState<string>('');
   const [fullName, setFullName] = useState<string>('');
   const [nickname, setNickname] = useState<string>('');
+  const [assignedClassId, setAssignedClassId] = useState<string>('cls-4');
   const [gender, setGender] = useState<'L' | 'P'>('L');
   const [birthPlace, setBirthPlace] = useState<string>('Temanggung');
   const [birthDate, setBirthDate] = useState<string>('2016-01-01');
@@ -39,9 +44,14 @@ export const StudentsPage: React.FC = () => {
   const loadData = async () => {
     setIsLoading(true);
     try {
-      const [std, cls] = await Promise.all([academicService.getStudents(), academicService.getClasses()]);
+      const [std, cls, cm] = await Promise.all([
+        academicService.getStudents(),
+        academicService.getClasses(),
+        academicService.getClassMembers(),
+      ]);
       setStudents(std);
       setClasses(cls);
+      setClassMembers(cm);
     } catch (err) {
       console.error('Gagal memuat data siswa:', err);
     } finally {
@@ -59,6 +69,7 @@ export const StudentsPage: React.FC = () => {
     setNisn(`014567890${students.length + 1}`);
     setFullName('');
     setNickname('');
+    setAssignedClassId('cls-4');
     setGender('L');
     setBirthPlace('Temanggung');
     setBirthDate('2016-01-01');
@@ -74,6 +85,8 @@ export const StudentsPage: React.FC = () => {
     setNisn(student.nisn || '');
     setFullName(student.full_name);
     setNickname(student.nickname || '');
+    const member = classMembers.find((cm) => cm.student_id === student.id);
+    setAssignedClassId(member ? member.class_id : 'cls-4');
     setGender(student.gender);
     setBirthPlace(student.birth_place || '');
     setBirthDate(student.birth_date || '2016-01-01');
@@ -99,9 +112,12 @@ export const StudentsPage: React.FC = () => {
           parent_phone: parentPhone,
           address,
         });
+        if (assignedClassId) {
+          await academicService.assignStudentToClass(editingStudentId, assignedClassId, 'ay-2026');
+        }
         setStatusMessage(`Data siswa ${fullName} berhasil diperbarui.`);
       } else {
-        await academicService.createStudent({
+        const created = await academicService.createStudent({
           nis,
           nisn: nisn || null,
           full_name: fullName,
@@ -114,7 +130,10 @@ export const StudentsPage: React.FC = () => {
           address,
           is_active: true,
         });
-        setStatusMessage(`Siswa ${fullName} berhasil ditambahkan.`);
+        if (assignedClassId) {
+          await academicService.assignStudentToClass(created.id, assignedClassId, 'ay-2026');
+        }
+        setStatusMessage(`Siswa ${fullName} berhasil ditambahkan ke ${classes.find(c => c.id === assignedClassId)?.name || 'kelas'}.`);
       }
       setShowModal(false);
       loadData();
@@ -136,14 +155,100 @@ export const StudentsPage: React.FC = () => {
     }
   };
 
+  const getStudentClassName = (studentId: string): string => {
+    const member = classMembers.find((cm) => cm.student_id === studentId);
+    if (!member) return 'Belum Diatur';
+    const cls = classes.find((c) => c.id === member.class_id);
+    return cls ? cls.name : 'Kelas 4';
+  };
+
+  const filteredStudents = students.filter((s: Student) => {
+    const matchesSearch =
+      s.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      s.nis.includes(searchTerm) ||
+      Boolean(s.nisn && s.nisn.includes(searchTerm));
+
+    if (!matchesSearch) return false;
+
+    if (selectedClassFilter !== 'all') {
+      const member = classMembers.find((cm: ClassMember) => cm.student_id === s.id);
+      if (!member || member.class_id !== selectedClassFilter) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  const handlePrintDocument = () => {
+    const filtered = filteredStudents;
+    const activeClassName = selectedClassFilter === 'all'
+      ? 'Seluruh Tingkat Kelas (1 s.d. 6)'
+      : classes.find((c: ClassRoom) => c.id === selectedClassFilter)?.name || selectedClassFilter;
+
+    const tableRows = filtered.map((s: Student, idx: number) => `
+      <tr>
+        <td class="center">${idx + 1}</td>
+        <td><strong>${s.full_name}</strong>${s.nickname ? `<br><small style="color:#64748b;">(${s.nickname})</small>` : ''}</td>
+        <td class="center font-mono">${s.nis} / ${s.nisn || '-'}</td>
+        <td class="center">${getStudentClassName(s.id)}</td>
+        <td class="center font-bold">${s.gender}</td>
+        <td>${s.birth_place || '-'}, ${s.birth_date || '-'}</td>
+        <td>${s.parent_guardian_name || '-'}<br><small>${s.parent_phone || '-'}</small></td>
+        <td class="center"><span style="color:#047857;font-weight:bold;">Aktif</span></td>
+      </tr>
+    `).join('');
+
+    const contentHtml = `
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 35px;">No</th>
+            <th>Nama Lengkap Peserta Didik</th>
+            <th>NIS / NISN</th>
+            <th style="width: 75px;">Rombel</th>
+            <th style="width: 40px;">L/P</th>
+            <th>Tempat, Tanggal Lahir</th>
+            <th>Nama Orang Tua / Wali</th>
+            <th style="width: 60px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tableRows}
+        </tbody>
+      </table>
+    `;
+
+    printDocumentDirectly(contentHtml, {
+      title: 'BUKU INDUK & DAFTAR PESERTA DIDIK',
+      subtitle: `Tahun Ajaran 2025/2026 - Rombel: ${activeClassName}`,
+      metadata: [
+        { label: 'Tahun Ajaran', value: '2025/2026 (Semester Ganjil)' },
+        { label: 'Filter Rombel', value: activeClassName },
+        { label: 'Total Siswa', value: `${filtered.length} Peserta Didik` },
+        { label: 'Tanggal Cetak', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
+      ],
+      signature: {
+        leftTitle: 'Wali Kelas / Pengelola Data,',
+        leftName: 'Ust. Ahmad Fauzi, S.Pd.I',
+        leftNip: '198503122019031008',
+        rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+        rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
+        rightName: 'MUIN, S.Pd.I',
+        rightNip: '197508152005011004',
+      },
+    });
+  };
+
   const exportCSV = () => {
-    const headers = ['ID', 'NIS', 'NISN', 'Nama Lengkap', 'Panggilan', 'JK', 'Tempat Lahir', 'Tanggal Lahir', 'Nama Wali', 'No HP Wali', 'Alamat'];
-    const rows = students.map((s) => [
+    const headers = ['ID', 'NIS', 'NISN', 'Nama Lengkap', 'Panggilan', 'Tingkat Rombel', 'JK', 'Tempat Lahir', 'Tanggal Lahir', 'Nama Wali', 'No HP Wali', 'Alamat'];
+    const rows = filteredStudents.map((s: Student) => [
       s.id,
       s.nis,
       s.nisn || '',
       `"${s.full_name}"`,
       s.nickname || '',
+      `"${getStudentClassName(s.id)}"`,
       s.gender,
       s.birth_place || '',
       s.birth_date || '',
@@ -161,14 +266,6 @@ export const StudentsPage: React.FC = () => {
     document.body.removeChild(link);
   };
 
-  const filteredStudents = students.filter((s) => {
-    const matchesSearch =
-      s.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      s.nis.includes(searchTerm) ||
-      (s.nisn && s.nisn.includes(searchTerm));
-    return matchesSearch;
-  });
-
   return (
     <div className="space-y-6 max-w-6xl">
       {/* Header */}
@@ -181,6 +278,14 @@ export const StudentsPage: React.FC = () => {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
+            onClick={handlePrintDocument}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+            title="Cetak Buku Induk Siswa Resmi Lengkap Kop Madrasah"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Cetak PDF Siap Cetak</span>
+          </button>
+          <button
             onClick={exportCSV}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-medium rounded-lg shadow-xs transition-colors"
           >
@@ -189,7 +294,7 @@ export const StudentsPage: React.FC = () => {
           </button>
           <button
             onClick={openAddModal}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
+            className="flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors"
           >
             <Plus className="w-4 h-4" />
             <span>Tambah Siswa</span>
@@ -216,6 +321,21 @@ export const StudentsPage: React.FC = () => {
             className="w-full text-xs pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600"
           />
         </div>
+
+        <div className="w-full sm:w-60">
+          <select
+            value={selectedClassFilter}
+            onChange={(e) => setSelectedClassFilter(e.target.value)}
+            className="w-full text-xs px-3 py-2 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-medium"
+          >
+            <option value="all">Semua Rombel (Kelas 1 s.d. 6)</option>
+            {classes.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} (Fase {c.phase})
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Tabel Data Siswa */}
@@ -227,7 +347,8 @@ export const StudentsPage: React.FC = () => {
                 <th className="py-3 px-4">No</th>
                 <th className="py-3 px-4">Nama Lengkap & Panggilan</th>
                 <th className="py-3 px-4">NIS / NISN</th>
-                <th className="py-3 px-4">L/P</th>
+                <th className="py-3 px-4">Tingkat Rombel</th>
+                <th className="py-3 px-4 text-center">L/P</th>
                 <th className="py-3 px-4">Tempat, Tanggal Lahir</th>
                 <th className="py-3 px-4">Wali Santri & Telepon</th>
                 <th className="py-3 px-4 text-center">Status</th>
@@ -237,14 +358,15 @@ export const StudentsPage: React.FC = () => {
             <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
               {isLoading ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-400">
+                  <td colSpan={9} className="py-8 text-center text-slate-400">
                     Memuat data siswa...
                   </td>
                 </tr>
               ) : filteredStudents.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-400">
-                    Tidak ditemukan peserta didik yang sesuai.
+                  <td colSpan={9} className="py-12 text-center text-slate-500">
+                    <p className="font-semibold text-slate-700">Belum ada data peserta didik.</p>
+                    <p className="text-[11px] text-slate-400 mt-1">Silakan klik tombol "Tambah Siswa" di atas atau impor data dari menu Migrasi Data.</p>
                   </td>
                 </tr>
               ) : (
@@ -259,7 +381,13 @@ export const StudentsPage: React.FC = () => {
                       <div className="text-slate-900 font-medium">{s.nis}</div>
                       <div className="text-[11px] text-slate-400">{s.nisn || '-'}</div>
                     </td>
-                    <td className="py-3 px-4 font-medium">
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                        <School className="w-3 h-3 text-emerald-600" />
+                        <span>{getStudentClassName(s.id)}</span>
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-center">
                       <span
                         className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${
                           s.gender === 'L' ? 'bg-blue-50 text-blue-700' : 'bg-pink-50 text-pink-700'
@@ -353,7 +481,7 @@ export const StudentsPage: React.FC = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Panggilan</label>
                   <input
@@ -372,6 +500,21 @@ export const StudentsPage: React.FC = () => {
                   >
                     <option value="L">Laki-laki (L)</option>
                     <option value="P">Perempuan (P)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tingkat Rombel</label>
+                  <select
+                    value={assignedClassId}
+                    onChange={(e) => setAssignedClassId(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white font-semibold text-emerald-900"
+                    required
+                  >
+                    {classes.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>

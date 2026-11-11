@@ -8,18 +8,15 @@ const LOCAL_SESSION_KEY = 'simpel_mi_session_user';
 export async function loginWithEmail(email: string, password?: string): Promise<AuthUser> {
   const normalizedInput = email.trim().toLowerCase();
 
-  // Cari apakah ada akun demo yang cocok
-  const matchedDemo = DEMO_USERS.find((u) => {
+  // Akun tunggal Administrator Madrasah atau akun terdaftar
+  const matchedUser = DEMO_USERS.find((u) => {
     const uEmail = u.email.toLowerCase();
     return (
       uEmail === normalizedInput ||
       (normalizedInput.includes('alihsan') && uEmail.includes('alihsan')) ||
-      (normalizedInput === 'admin' && u.roles.includes('admin')) ||
-      (normalizedInput === 'kamad' && u.roles.includes('kepala_madrasah')) ||
-      (normalizedInput === 'guru' && u.roles.includes('guru') && u.roles.includes('wali_kelas')) ||
-      (normalizedInput === 'pjok' && u.email.includes('pjok'))
+      normalizedInput === 'admin'
     );
-  });
+  }) || (normalizedInput === 'alihsansoborejo@gmail.com' ? DEMO_USERS[0] : undefined);
 
   if (isSupabaseConfigured) {
     try {
@@ -33,69 +30,59 @@ export async function loginWithEmail(email: string, password?: string): Promise<
         return await fetchFullUserAccount(userId, normalizedInput);
       }
     } catch (supaErr) {
-      console.warn('Supabase Auth error, checking fallback demo:', supaErr);
+      console.warn('Supabase Auth error, checking fallback administrator account:', supaErr);
     }
 
-    // Jika Supabase Auth belum memiliki akun ini tapi cocok dengan akun demo pengujian
-    if (matchedDemo) {
+    // Jika Supabase Auth belum terisi tapi cocok dengan akun Administrator
+    if (matchedUser) {
       const authUser: AuthUser = {
-        id: matchedDemo.id,
-        email: matchedDemo.email,
-        profile: matchedDemo.profile,
-        roles: matchedDemo.roles,
-        activeRole: matchedDemo.roles[0],
-        teacherId: matchedDemo.teacherId,
+        id: matchedUser.id,
+        email: matchedUser.email,
+        profile: matchedUser.profile,
+        roles: matchedUser.roles,
+        activeRole: matchedUser.roles[0],
+        teacherId: matchedUser.teacherId,
       };
       localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));
       return authUser;
     }
 
     throw new Error(
-      `Email "${email}" belum terdaftar di Supabase Auth madrasah. Silakan buat akun di Supabase Auth atau gunakan tombol "Masuk Cepat 1-Klik" di bawah untuk uji coba langsung.`
+      `Email "${email}" belum terdaftar. Gunakan akun Administrator: alihsansoborejo@gmail.com atau daftarkan akun baru melalui panel Administrator.`
     );
   }
 
-  // Fallback demo accounts ketika Supabase belum dihubungkan dengan API key
-  if (!matchedDemo) {
+  // Fallback single administrator account ketika Supabase belum dihubungkan dengan API key
+  if (!matchedUser) {
     throw new Error(
-      `Email "${email}" belum terdaftar. Silakan gunakan alihsansoborejo@gmail.com, admin@alihsan.sch.id, atau klik salah satu tombol "Masuk Cepat 1-Klik" di bawah.`
+      `Email "${email}" belum terdaftar. Silakan masuk menggunakan akun Administrator: alihsansoborejo@gmail.com`
     );
   }
 
   const authUser: AuthUser = {
-    id: matchedDemo.id,
-    email: matchedDemo.email,
-    profile: matchedDemo.profile,
-    roles: matchedDemo.roles,
-    activeRole: matchedDemo.roles[0],
-    teacherId: matchedDemo.teacherId,
+    id: matchedUser.id,
+    email: matchedUser.email,
+    profile: matchedUser.profile,
+    roles: matchedUser.roles,
+    activeRole: matchedUser.roles[0],
+    teacherId: matchedUser.teacherId,
   };
 
   localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));
   return authUser;
 }
 
-export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok'): Promise<AuthUser> {
-  const emailMap = {
-    admin: 'alihsansoborejo@gmail.com',
-    kamad: 'kamad@alihsan.sch.id',
-    guru: 'guru@alihsan.sch.id',
-    pjok: 'guru.pjok@alihsan.sch.id',
-  };
-  const targetEmail = emailMap[target].toLowerCase();
-
-  const matchedDemo =
-    DEMO_USERS.find((u) => u.email.toLowerCase() === targetEmail) ||
-    DEMO_USERS.find((u) => (target === 'admin' && u.roles.includes('admin'))) ||
-    DEMO_USERS[0];
+export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok' = 'admin'): Promise<AuthUser> {
+  const adminAccount = DEMO_USERS[0];
 
   const authUser: AuthUser = {
-    id: matchedDemo.id,
-    email: matchedDemo.email,
-    profile: matchedDemo.profile,
-    roles: matchedDemo.roles,
-    activeRole: matchedDemo.roles[0],
-    teacherId: matchedDemo.teacherId,
+    id: adminAccount.id,
+    email: adminAccount.email,
+    profile: adminAccount.profile,
+    roles: adminAccount.roles,
+    activeRole: adminAccount.roles[0],
+    teacherId: adminAccount.teacherId,
+    homeroomClassId: adminAccount.homeroomClassId,
   };
 
   localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));
@@ -155,6 +142,7 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
     roles,
     activeRole,
     teacherId,
+    homeroomClassId: null,
   };
 
   localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));

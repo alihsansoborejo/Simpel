@@ -138,6 +138,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             section: 'KELAS BINAAN',
             items: [
               { id: 'dashboard', label: 'Dashboard Wali Kelas', icon: LayoutDashboard },
+              { id: 'presensi', label: 'Presensi Harian Rombel', icon: CalendarCheck, badge: 'Harian' },
               { id: 'siswa-kelas', label: 'Daftar Siswa Kelas', icon: Users },
               { id: 'monitoring-nilai-mapel', label: 'Monitoring Nilai Mapel', icon: Award },
               { id: 'rekap-presensi-kelas', label: 'Rekap Presensi Rombel', icon: CalendarCheck },
@@ -250,24 +251,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       <LayoutDashboard className="w-4 h-4 text-emerald-400" />
                       <span>Beranda Guru</span>
                     </div>
-                  </button>
-
-                  {/* 1. Presensi Siswa Harian */}
-                  <button
-                    onClick={() => handleItemClick('presensi')}
-                    className={`flex items-center justify-between w-full px-3 py-2 text-xs font-semibold rounded-lg transition-colors text-left ${
-                      activeView === 'presensi'
-                        ? 'bg-emerald-600 text-white shadow-xs'
-                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <CalendarCheck className="w-4 h-4 text-amber-300" />
-                      <span>Presensi Siswa Harian</span>
-                    </div>
-                    <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-400 text-slate-900">
-                      Harian
-                    </span>
                   </button>
                 </div>
               </div>
@@ -458,6 +441,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
                               </div>
                               <span className="px-1 text-[9px] font-extrabold rounded bg-amber-400/20 text-amber-300 border border-amber-400/40">
                                 SAS
+                              </span>
+                            </button>
+
+                            <button
+                              onClick={() => handleItemClick('leger-nilai')}
+                              className={`flex items-center justify-between w-full px-2 py-1 rounded transition-colors text-left mt-1 border-t border-slate-800/60 pt-1.5 ${
+                                activeView === 'leger-nilai'
+                                  ? 'bg-emerald-600 text-white font-bold shadow-xs'
+                                  : 'text-emerald-300 hover:bg-slate-800 hover:text-white'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="text-emerald-400 font-bold font-mono">📊</span>
+                                <span className="font-bold">Leger Nilai TP/LM & Rapor</span>
+                              </div>
+                              <span className="px-1 text-[9px] font-bold rounded bg-emerald-400/20 text-emerald-300 border border-emerald-400/40">
+                                Leger
                               </span>
                             </button>
                           </div>

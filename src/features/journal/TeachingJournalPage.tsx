@@ -3,6 +3,7 @@ import { journalService } from '../../services/journalService';
 import { academicService } from '../../services/academicService';
 import { TeachingJournal, TeachingAssignment } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { printDocumentDirectly } from '../../services/printService';
 import {
   ClipboardList,
   Plus,
@@ -149,7 +150,56 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
   };
 
   const handlePrint = () => {
-    window.print();
+    const tableRows = filteredJournals.map((j, idx) => `
+      <tr>
+        <td class="center">${idx + 1}</td>
+        <td class="center font-mono">${j.date}</td>
+        <td><strong>${j.assignment?.subject?.name || 'Mata Pelajaran'}</strong><br><small>${j.assignment?.class?.name || 'Kelas 4'}</small></td>
+        <td>${j.topic}</td>
+        <td>${j.learning_activities}</td>
+        <td><span style="color:#047857;font-weight:bold;">${j.learning_method || '-'}</span></td>
+        <td>Jam: ${j.period_hours || '-'}<br><small>Hambatan: ${j.obstacles || 'Nihil'}</small></td>
+      </tr>
+    `).join('');
+
+    const contentHtml = `
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 30px;">No</th>
+            <th style="width: 80px;">Tanggal KBM</th>
+            <th style="width: 140px;">Mata Pelajaran & Kelas</th>
+            <th>Materi Pokok Pembelajaran</th>
+            <th>Aktivitas KBM (Deep Learning)</th>
+            <th style="width: 130px;">Nilai KBC</th>
+            <th style="width: 140px;">Presensi & Catatan</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tableRows}
+        </tbody>
+      </table>
+    `;
+
+    printDocumentDirectly(contentHtml, {
+      title: 'BUKU JURNAL MENGAJAR HARIAN GURU',
+      subtitle: 'Tahun Ajaran 2025/2026 - Berbasis Kurikulum Cinta (KBC) & Pembelajaran Mendalam',
+      metadata: [
+        { label: 'Tahun Pelajaran', value: '2025/2026 (Semester Ganjil)' },
+        { label: 'Total Pertemuan', value: `${filteredJournals.length} Catatan Jurnal KBM` },
+        { label: 'Pendekatan', value: 'Kurikulum Berbasis Cinta (KBC)' },
+        { label: 'Tanggal Cetak', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
+      ],
+      signature: {
+        leftTitle: 'Guru Pengampu Mata Pelajaran,',
+        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
+        leftNip: '198503122019031008',
+        rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+        rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
+        rightName: 'MUIN, S.Pd.I',
+        rightNip: '197508152005011004',
+      },
+    });
   };
 
   return (

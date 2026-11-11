@@ -113,6 +113,8 @@ export interface ClassRoom {
   name: string;
   phase: 'A' | 'B' | 'C';
   capacity: number;
+  homeroom_teacher_id?: string | null;
+  homeroom_teacher?: Teacher;
   created_at: string;
 }
 

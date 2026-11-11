@@ -36,36 +36,7 @@ export interface IssueReport {
 
 const STORAGE_KEY = 'simpel_mi_issue_reports';
 
-const INITIAL_ISSUES: IssueReport[] = [
-  {
-    id: 'ISS-001',
-    reporterName: 'Ust. Ahmad Fauzi, S.Pd.I',
-    reporterEmail: 'guru@alihsan.sch.id',
-    reporterRole: 'guru',
-    moduleName: 'Penilaian (Sumatif Tengah Semester)',
-    priority: 'Sedang',
-    status: 'Selesai',
-    description: 'Format cetak leger nilai perlu diperluas agar memuat kolom rincian STS dan SAS secara berdampingan.',
-    stepsToReproduce: 'Masuk ke Perangkat Evaluasi -> STS -> Rekap Nilai -> Klik Cetak Leger.',
-    createdAt: '2026-11-08T09:30:00Z',
-    resolutionNotes: 'Sudah disesuaikan pada Tahap 7 dengan matriks lingkup materi LM1-LM4 serta tombol STS dan SAS.',
-    resolvedAt: '2026-11-08T14:00:00Z',
-  },
-  {
-    id: 'ISS-002',
-    reporterName: 'MUIN, S.Pd.I',
-    reporterEmail: 'kamad@alihsan.sch.id',
-    reporterRole: 'kepala_madrasah',
-    moduleName: 'Supervisi Akademik & KBM',
-    priority: 'Tinggi',
-    status: 'Selesai',
-    description: 'Dibutuhkan kolom catatan bimbingan profesional langsung saat mereview berkas modul ajar.',
-    stepsToReproduce: 'Buka Arsip Google Drive -> Klik Telaah -> Masukkan catatan bimbingan.',
-    createdAt: '2026-11-08T10:15:00Z',
-    resolutionNotes: 'Modal telaah dokumen dan instrumen supervisi klinis telah disempurnakan dengan rekomendasi konstruktif.',
-    resolvedAt: '2026-11-08T15:30:00Z',
-  },
-];
+const INITIAL_ISSUES: IssueReport[] = [];
 
 export const IssueTrackingPage: React.FC = () => {
   const { user, activeRole } = useAuth();

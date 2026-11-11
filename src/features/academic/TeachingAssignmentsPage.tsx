@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { academicService } from '../../services/academicService';
 import { TeachingAssignment, Teacher, ClassRoom, Subject } from '../../types/database.types';
+import { printDocumentDirectly } from '../../services/printService';
 import {
   ClipboardList,
   Search,
@@ -325,7 +326,109 @@ export const TeachingAssignmentsPage: React.FC<Props> = ({ initialView, onNaviga
   };
 
   const handlePrint = () => {
-    window.print();
+    let title = 'SURAT KEPUTUSAN & PEMBAGIAN TUGAS MENGAJAR';
+    let subtitle = 'Tahun Pelajaran 2025/2026 - MI Ma\'arif Al Ihsan Soborejo';
+    let contentHtml = '';
+
+    if (activeRombelId === 'rekap-semua') {
+      title = 'MATRIKS PEMBAGIAN TUGAS MENGAJAR (SELURUH ROMBEL)';
+      contentHtml = `
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 30px;">No</th>
+              <th style="width: 150px;">Mata Pelajaran</th>
+              <th style="width: 70px;">Kelompok</th>
+              <th style="width: 40px;">Kls 1</th>
+              <th style="width: 40px;">Kls 2</th>
+              <th style="width: 40px;">Kls 3</th>
+              <th style="width: 40px;">Kls 4</th>
+              <th style="width: 40px;">Kls 5</th>
+              <th style="width: 40px;">Kls 6</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${subjects.map((sbj, idx) => {
+              const getTeacherInitial = (cid: string) => {
+                const asg = assignments.find(a => a.class_id === cid && a.subject_id === sbj.id);
+                if (!asg || !asg.teacher) return '<span style="color:#cbd5e1;">-</span>';
+                return `<small><strong>${asg.teacher.full_name}</strong></small>`;
+              };
+              return `
+                <tr>
+                  <td class="center">${idx + 1}</td>
+                  <td><strong>${sbj.name}</strong></td>
+                  <td class="center">${sbj.category}</td>
+                  <td>${getTeacherInitial('cls-1')}</td>
+                  <td>${getTeacherInitial('cls-2')}</td>
+                  <td>${getTeacherInitial('cls-3')}</td>
+                  <td>${getTeacherInitial('cls-4')}</td>
+                  <td>${getTeacherInitial('cls-5')}</td>
+                  <td>${getTeacherInitial('cls-6')}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    } else {
+      const cls = currentClass;
+      title = `PENUGASAN GURU MENGAJAR - ${cls.name.toUpperCase()}`;
+      subtitle = `Fase ${cls.phase} - Tahun Pelajaran 2025/2026 (Semester Ganjil)`;
+
+      contentHtml = `
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 35px;">No</th>
+              <th style="width: 80px;">Kode</th>
+              <th>Mata Pelajaran</th>
+              <th style="width: 100px;">Kelompok</th>
+              <th>Nama Guru Pengampu</th>
+              <th style="width: 110px;">NIP / NUPTK</th>
+              <th style="width: 70px;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${subjects.map((sbj, idx) => {
+              const asg = assignments.find(a => a.class_id === cls.id && a.subject_id === sbj.id);
+              const t = asg?.teacher;
+              return `
+                <tr>
+                  <td class="center">${idx + 1}</td>
+                  <td class="center font-mono font-bold">${sbj.code}</td>
+                  <td><strong>${sbj.name}</strong></td>
+                  <td class="center">${sbj.category}</td>
+                  <td>${t ? `<strong>${t.title_prefix || ''} ${t.full_name} ${t.title_suffix || ''}</strong>` : '<span style="color:#e11d48;font-style:italic;">Belum Ditugaskan</span>'}</td>
+                  <td class="center font-mono">${t?.nip || t?.nuptk || '-'}</td>
+                  <td class="center">${t ? '<span style="color:#047857;font-weight:bold;">Aktif</span>' : '<span style="color:#e11d48;">Kosong</span>'}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    printDocumentDirectly(contentHtml, {
+      title,
+      subtitle,
+      metadata: [
+        { label: 'Tahun Pelajaran', value: '2025/2026 (Semester Ganjil)' },
+        { label: 'Fokus Rombel', value: activeRombelId === 'rekap-semua' ? 'Matriks Seluruh Rombel' : currentClass.name },
+        { label: 'Total Mapel', value: `${subjects.length} Mata Pelajaran` },
+        { label: 'Tanggal Dokumen', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
+      ],
+      signature: {
+        leftTitle: 'Waka Kurikulum / Akademik,',
+        leftName: 'Ust. Ahmad Fauzi, S.Pd.I',
+        leftNip: '198503122019031008',
+        rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+        rightTitle: 'Kepala Madrasah,',
+        rightName: 'MUIN, S.Pd.I',
+        rightNip: '197508152005011004',
+      },
+    });
   };
 
   // Helper for Category badge colors
