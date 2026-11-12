@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useGoogleDrive } from '../../context/GoogleDriveContext';
 import { ROLE_CONFIGS } from '../../types/auth.types';
 import { UserRole } from '../../types/database.types';
 import { isSupabaseConfigured } from '../../lib/supabaseClient';
@@ -13,6 +14,7 @@ import {
   Database,
   ArrowRightLeft,
   HelpCircle,
+  HardDrive,
 } from 'lucide-react';
 import { NotificationDrawer } from '../notification/NotificationDrawer';
 import { HelpGuideModal } from '../common/HelpGuideModal';
@@ -25,6 +27,7 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, activeView }) => {
   const { user, activeRole, availableRoles, switchActiveRole, logout } = useAuth();
+  const { isConnected: isDriveConnected, googleUser } = useGoogleDrive();
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isRoleMenuOpen, setIsRoleMenuOpen] = useState(false);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
@@ -81,6 +84,23 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, a
           <Database className={`w-3.5 h-3.5 ${isSupabaseConfigured ? 'text-emerald-600' : 'text-amber-600'}`} />
           <span>{isSupabaseConfigured ? 'Supabase Live' : 'Demo Mode (Lokal)'}</span>
         </div>
+
+        {/* Google Drive Status Button */}
+        <button
+          onClick={() => onNavigate('penyimpanan-drive')}
+          className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer ${
+            isDriveConnected
+              ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+          }`}
+          title="Buka Penyimpanan Google Drive"
+        >
+          <HardDrive className={`w-3.5 h-3.5 ${isDriveConnected ? 'text-emerald-700' : 'text-slate-400'}`} />
+          <span className="truncate max-w-[140px]">
+            {isDriveConnected ? (googleUser?.displayName || 'Drive Terhubung') : 'Google Drive'}
+          </span>
+          {isDriveConnected && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+        </button>
 
         {/* Multi-role Switcher Pill (if user has > 1 role) */}
         {availableRoles.length > 1 && (

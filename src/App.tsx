@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AppSettingsProvider } from './context/AppSettingsContext';
+import { GoogleDriveProvider } from './context/GoogleDriveContext';
 import { LoginPage } from './features/auth/LoginPage';
 import { AppLayout } from './components/layout/AppLayout';
 import { DashboardPage } from './features/dashboard/DashboardPage';
+import { GoogleDriveStoragePage } from './features/storage/GoogleDriveStoragePage';
 import { UserManagementPage } from './features/users/UserManagementPage';
 import { ProfilePage } from './features/profile/ProfilePage';
 import { AccessDeniedPage } from './features/auth/AccessDeniedPage';
@@ -296,6 +298,9 @@ const MainAppContent: React.FC = () => {
         return <AIAssistantPage initialTab={defaultTab} onNavigate={setActiveView} />;
       }
 
+      case 'penyimpanan-drive':
+        return <GoogleDriveStoragePage />;
+
       case 'log-aktivitas':
       case 'laporan-madrasah':
         return (
@@ -324,7 +329,9 @@ export default function App() {
   return (
     <AppSettingsProvider>
       <AuthProvider>
-        <MainAppContent />
+        <GoogleDriveProvider>
+          <MainAppContent />
+        </GoogleDriveProvider>
       </AuthProvider>
     </AppSettingsProvider>
   );

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { curriculumService } from '../../services/curriculumService';
 import { DocumentLink, DocumentStatus } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { useGoogleDrive } from '../../context/GoogleDriveContext';
 import {
   FolderSync,
   ExternalLink,
@@ -13,6 +14,8 @@ import {
   Send,
   MessageSquare,
   Search,
+  UploadCloud,
+  HardDrive,
 } from 'lucide-react';
 
 export const CurriculumDocsPage: React.FC = () => {
@@ -28,6 +31,12 @@ export const CurriculumDocsPage: React.FC = () => {
   const [reviewDecision, setReviewDecision] = useState<'Disetujui' | 'Perlu Revisi'>('Disetujui');
   const [reviewNotes, setReviewNotes] = useState<string>('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Google Drive Context
+  const { isConnected, isConnecting, connect, uploadFile, googleUser } = useGoogleDrive();
+  const [modalTab, setModalTab] = useState<'upload' | 'url'>('upload');
+  const [fileToUpload, setFileToUpload] = useState<File | null>(null);
+  const [isUploadingToDrive, setIsUploadingToDrive] = useState<boolean>(false);
 
   // Form State
   const [docType, setDocType] = useState<string>('Modul Ajar');
@@ -51,6 +60,53 @@ export const CurriculumDocsPage: React.FC = () => {
   }, []);
 
   const DRIVE_REGEX = /^(https?:\/\/)?(drive|docs)\.google\.com\/(file\/d\/|document\/d\/|spreadsheets\/d\/|presentation\/d\/|drive\/folders\/|open\?id=|[a-zA-Z0-9_-]+).*/i;
+
+  const handleDirectUploadToDrive = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!fileToUpload) {
+      alert('Pilih berkas dari perangkat Anda terlebih dahulu.');
+      return;
+    }
+
+    setIsUploadingToDrive(true);
+    try {
+      const fileExt = fileToUpload.name.split('.').pop() || 'pdf';
+      const cleanTitle = title.trim() || fileToUpload.name.replace(/\.[^/.]+$/, '');
+      const fileNameToUse = title.trim() ? `${cleanTitle}.${fileExt}` : fileToUpload.name;
+
+      const uploaded = await uploadFile(
+        fileToUpload,
+        fileNameToUse,
+        `Dokumen ${docType} diunggah oleh ${user?.profile.full_name || 'Guru Madrasah'}`
+      );
+
+      await curriculumService.createDocument({
+        teacher_id: user?.teacherId || 'tch-1',
+        academic_year_id: 'ay-2026',
+        semester_id: 'sem-ganjil-2026',
+        class_id: 'cls-4',
+        subject_id: 'sbj-ind',
+        document_type: docType,
+        title: cleanTitle,
+        google_drive_url: uploaded.webViewLink || 'https://drive.google.com',
+        file_id: uploaded.id,
+        status: 'Draft',
+        submission_date: null,
+      });
+
+      setShowAddModal(false);
+      setTitle('');
+      setDriveUrl('');
+      setFileToUpload(null);
+      setStatusMessage(`Berkas "${fileNameToUse}" berhasil diunggah ke Google Drive dan tercatat dalam sistem!`);
+      loadDocs();
+      setTimeout(() => setStatusMessage(null), 4000);
+    } catch (err: any) {
+      alert(`Gagal mengunggah ke Google Drive: ${err?.message || 'Terjadi kesalahan'}`);
+    } finally {
+      setIsUploadingToDrive(false);
+    }
+  };
 
   const handleCreateDocument = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -161,16 +217,37 @@ export const CurriculumDocsPage: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-slate-900 tracking-tight">Arsip Dokumen Kurikulum (Google Drive)</h1>
           <p className="text-xs text-slate-500 mt-1">
-            Pengelolaan berkas pembelajaran (CP, TP, ATP, Prota, Prosem, Modul Ajar, LKPD) melalui tautan resmi Google Drive.
+            Pengelolaan berkas pembelajaran (CP, TP, ATP, Prota, Prosem, Modul Ajar, LKPD) langsung terhubung ke Google Drive madrasah.
           </p>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Tautkan Dokumen Baru</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          {isConnected ? (
+            <div className="hidden sm:flex items-center gap-2 px-2.5 py-1.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span className="font-medium truncate max-w-[150px]">{googleUser?.email}</span>
+            </div>
+          ) : (
+            <button
+              onClick={connect}
+              disabled={isConnecting}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
+            >
+              <HardDrive className="w-3.5 h-3.5 text-emerald-800" />
+              <span>{isConnecting ? 'Menghubungkan...' : 'Sambungkan Google Drive'}</span>
+            </button>
+          )}
+
+          <button
+            onClick={() => {
+              setModalTab('upload');
+              setShowAddModal(true);
+            }}
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
+          >
+            <UploadCloud className="w-4 h-4" />
+            <span>Unggah / Tautkan Dokumen</span>
+          </button>
+        </div>
       </div>
 
       {/* Panduan Google Drive Institusi */}
@@ -180,21 +257,25 @@ export const CurriculumDocsPage: React.FC = () => {
             <FolderSync className="w-4 h-4" />
           </div>
           <div>
-            <h4 className="text-xs font-bold text-emerald-950">Pedoman Integrasi Google Drive Institusi</h4>
+            <h4 className="text-xs font-bold text-emerald-950">
+              Penyimpanan Langsung: Folder "SIMPEL MI Al Ihsan Soborejo"
+            </h4>
             <p className="text-[11px] text-emerald-800 mt-0.5 leading-relaxed">
-              Semua berkas pembelajaran (CP, TP, ATP, Modul Ajar, LKPD) disimpan pada Google Shared Drive resmi madrasah. Supabase hanya mengelola metadata, penelaahan, dan tautan dokumen. Pastikan izin berbagi disetel ke "Siapa saja dengan tautan (Akses Melihat/Pemberi Komentar)".
+              Semua berkas pembelajaran yang Anda unggah secara otomatis disimpan di dalam folder khusus di Google Drive akun Anda. Tautan resmi akan otomatis digenerate dan dikirim ke sistem untuk ditelaah oleh Kepala Madrasah.
             </p>
           </div>
         </div>
-        <a
-          href="https://drive.google.com"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-emerald-300 text-emerald-900 rounded-lg text-xs font-semibold hover:bg-emerald-100/50 transition-colors shrink-0 shadow-2xs"
-        >
-          <span>Buka Google Drive</span>
-          <ExternalLink className="w-3.5 h-3.5" />
-        </a>
+        <div className="flex items-center gap-2 shrink-0">
+          <a
+            href="https://drive.google.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-emerald-300 text-emerald-900 rounded-lg text-xs font-semibold hover:bg-emerald-100/50 transition-colors shadow-2xs"
+          >
+            <span>Buka Google Drive</span>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </a>
+        </div>
       </div>
 
       {statusMessage && (
@@ -338,77 +419,217 @@ export const CurriculumDocsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Modal Tautkan Dokumen Baru */}
+      {/* Modal Tautkan / Unggah Dokumen Baru */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl border border-slate-200">
-            <h3 className="text-base font-bold text-slate-900 mb-1">Tautkan Dokumen Google Drive</h3>
-            <p className="text-xs text-slate-500 mb-4">
-              Masukkan tautan berkas resmi Google Drive untuk perangkat ajar madrasah.
-            </p>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <HardDrive className="w-5 h-5 text-emerald-800" />
+                <span>Dokumen Google Drive Madrasah</span>
+              </h3>
+              <button
+                onClick={() => setShowAddModal(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
 
-            <form onSubmit={handleCreateDocument} className="space-y-4">
+            {/* Tab Switcher */}
+            <div className="flex border-b border-slate-200 mb-4 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => setModalTab('upload')}
+                className={`flex-1 py-2 text-center border-b-2 transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
+                  modalTab === 'upload'
+                    ? 'border-emerald-800 text-emerald-900 font-bold'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <UploadCloud className="w-3.5 h-3.5" />
+                <span>Unggah Berkas Langsung</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setModalTab('url')}
+                className={`flex-1 py-2 text-center border-b-2 transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
+                  modalTab === 'url'
+                    ? 'border-emerald-800 text-emerald-900 font-bold'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Input Tautan Manual</span>
+              </button>
+            </div>
+
+            {modalTab === 'upload' ? (
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis Perangkat Kurikulum</label>
-                <select
-                  value={docType}
-                  onChange={(e) => setDocType(e.target.value)}
-                  className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
-                  required
-                >
-                  <option value="Modul Ajar">Modul Ajar (RPP Merdeka)</option>
-                  <option value="Alur Tujuan Pembelajaran (ATP)">Alur Tujuan Pembelajaran (ATP)</option>
-                  <option value="Capaian Pembelajaran (CP)">Capaian Pembelajaran (CP)</option>
-                  <option value="Program Tahunan (Prota)">Program Tahunan (Prota)</option>
-                  <option value="Program Semester (Prosem)">Program Semester (Prosem)</option>
-                  <option value="Lembar Kerja Peserta Didik (LKPD)">Lembar Kerja Peserta Didik (LKPD)</option>
-                  <option value="Kisi-Kisi Asesmen">Kisi-Kisi Asesmen</option>
-                </select>
-              </div>
+                {!isConnected ? (
+                  <div className="text-center py-6 px-4 bg-slate-50 border border-slate-200 rounded-lg">
+                    <HardDrive className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+                    <p className="text-xs font-semibold text-slate-800 mb-1">
+                      Sambungkan Akun Google Terlebih Dahulu
+                    </p>
+                    <p className="text-[11px] text-slate-500 mb-3 max-w-sm mx-auto">
+                      Untuk mengunggah berkas langsung dari laptop/HP ke Google Drive madrasah, silakan hubungkan akun Google Anda.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={connect}
+                      disabled={isConnecting}
+                      className="inline-flex items-center gap-2 px-3.5 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                    >
+                      <span>{isConnecting ? 'Menghubungkan...' : 'Sambungkan Google Drive'}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <form onSubmit={handleDirectUploadToDrive} className="space-y-3.5">
+                    <div className="bg-emerald-50/80 border border-emerald-200 p-2.5 rounded-lg flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                        <span className="text-emerald-900 font-medium">
+                          Tersambung: <strong>{googleUser?.email}</strong>
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-emerald-700 bg-white px-2 py-0.5 rounded border border-emerald-200">
+                        Folder SIMPEL
+                      </span>
+                    </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Dokumen</label>
-                <input
-                  type="text"
-                  placeholder="Contoh: Modul Ajar IPAS Bab 2 Siklus Makhluk Hidup"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600"
-                  required
-                />
-              </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Pilih Berkas Perangkat Ajar (PDF / Word / Excel / Gambar) *
+                      </label>
+                      <input
+                        type="file"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            const f = e.target.files[0];
+                            setFileToUpload(f);
+                            if (!title) setTitle(f.name.replace(/\.[^/.]+$/, ''));
+                          }
+                        }}
+                        required
+                        className="w-full text-xs text-slate-600 border border-slate-200 rounded-lg p-2 bg-slate-50 file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border-0 file:text-[11px] file:font-semibold file:bg-emerald-800 file:text-white hover:file:bg-emerald-900 cursor-pointer"
+                      />
+                    </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Tautan Tautan Google Drive</label>
-                <input
-                  type="url"
-                  placeholder="https://drive.google.com/file/d/.../view?usp=sharing"
-                  value={driveUrl}
-                  onChange={(e) => setDriveUrl(e.target.value)}
-                  className="w-full text-xs font-mono px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600"
-                  required
-                />
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Pastikan akses berbagi tautan minimal disetel ke "Siapa saja dengan tautan dapat melihat".
-                </p>
-              </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis Perangkat Kurikulum</label>
+                      <select
+                        value={docType}
+                        onChange={(e) => setDocType(e.target.value)}
+                        className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
+                        required
+                      >
+                        <option value="Modul Ajar">Modul Ajar (RPP Merdeka)</option>
+                        <option value="Alur Tujuan Pembelajaran (ATP)">Alur Tujuan Pembelajaran (ATP)</option>
+                        <option value="Capaian Pembelajaran (CP)">Capaian Pembelajaran (CP)</option>
+                        <option value="Program Tahunan (Prota)">Program Tahunan (Prota)</option>
+                        <option value="Program Semester (Prosem)">Program Semester (Prosem)</option>
+                        <option value="Lembar Kerja Peserta Didik (LKPD)">Lembar Kerja Peserta Didik (LKPD)</option>
+                        <option value="Kisi-Kisi Asesmen">Kisi-Kisi Asesmen</option>
+                      </select>
+                    </div>
 
-              <div className="flex justify-end gap-2 pt-4 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowAddModal(false)}
-                  className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg font-medium"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs"
-                >
-                  Simpan Tautan
-                </button>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Dokumen</label>
+                      <input
+                        type="text"
+                        placeholder="Contoh: Modul Ajar IPAS Bab 2 Siklus Makhluk Hidup"
+                        value={title}
+                        onChange={(e) => setTitle(e.target.value)}
+                        className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600"
+                        required
+                      />
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => setShowAddModal(false)}
+                        className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg font-medium"
+                      >
+                        Batal
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isUploadingToDrive || !fileToUpload}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs disabled:opacity-50 cursor-pointer"
+                      >
+                        <UploadCloud className="w-3.5 h-3.5" />
+                        <span>{isUploadingToDrive ? 'Mengunggah ke Drive...' : 'Unggah & Simpan Dokumen'}</span>
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
-            </form>
+            ) : (
+              <form onSubmit={handleCreateDocument} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis Perangkat Kurikulum</label>
+                  <select
+                    value={docType}
+                    onChange={(e) => setDocType(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
+                    required
+                  >
+                    <option value="Modul Ajar">Modul Ajar (RPP Merdeka)</option>
+                    <option value="Alur Tujuan Pembelajaran (ATP)">Alur Tujuan Pembelajaran (ATP)</option>
+                    <option value="Capaian Pembelajaran (CP)">Capaian Pembelajaran (CP)</option>
+                    <option value="Program Tahunan (Prota)">Program Tahunan (Prota)</option>
+                    <option value="Program Semester (Prosem)">Program Semester (Prosem)</option>
+                    <option value="Lembar Kerja Peserta Didik (LKPD)">Lembar Kerja Peserta Didik (LKPD)</option>
+                    <option value="Kisi-Kisi Asesmen">Kisi-Kisi Asesmen</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Dokumen</label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: Modul Ajar IPAS Bab 2 Siklus Makhluk Hidup"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tautan URL Google Drive</label>
+                  <input
+                    type="url"
+                    placeholder="https://drive.google.com/file/d/.../view?usp=sharing"
+                    value={driveUrl}
+                    onChange={(e) => setDriveUrl(e.target.value)}
+                    className="w-full text-xs font-mono px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600"
+                    required
+                  />
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Pastikan akses berbagi disetel ke "Siapa saja dengan tautan dapat melihat".
+                  </p>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-4 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddModal(false)}
+                    className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg font-medium"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-1.5 text-xs bg-emerald-800 hover:bg-emerald-900 text-white font-semibold rounded-lg shadow-xs"
+                  >
+                    Simpan Tautan
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

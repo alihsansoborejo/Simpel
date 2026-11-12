@@ -2,21 +2,27 @@ import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 import { AuthUser } from '../types/auth.types';
 import { Profile, UserRole } from '../types/database.types';
 import { DEMO_USERS } from '../lib/demoData';
+import { getDemoUsers } from './userService';
+import { academicService } from './academicService';
 
 const LOCAL_SESSION_KEY = 'simpel_mi_session_user';
 
 export async function loginWithEmail(email: string, password?: string): Promise<AuthUser> {
   const normalizedInput = email.trim().toLowerCase();
 
-  // Akun tunggal Administrator Madrasah atau akun terdaftar
-  const matchedUser = DEMO_USERS.find((u) => {
-    const uEmail = u.email.toLowerCase();
-    return (
-      uEmail === normalizedInput ||
-      (normalizedInput.includes('alihsan') && uEmail.includes('alihsan')) ||
-      normalizedInput === 'admin'
-    );
-  }) || (normalizedInput === 'alihsansoborejo@gmail.com' ? DEMO_USERS[0] : undefined);
+  // Cari dari daftar seluruh akun yang dibuat atau master
+  const dynamicUsers = getDemoUsers();
+  const matchedUser =
+    dynamicUsers.find((u) => {
+      const uEmail = u.email.toLowerCase();
+      return (
+        uEmail === normalizedInput ||
+        (normalizedInput.includes('alihsan') && uEmail.includes('alihsan')) ||
+        (normalizedInput === 'admin' && u.roles.includes('admin'))
+      );
+    }) ||
+    DEMO_USERS.find((u) => u.email.toLowerCase() === normalizedInput) ||
+    (normalizedInput === 'alihsansoborejo@gmail.com' ? DEMO_USERS[0] : undefined);
 
   if (isSupabaseConfigured) {
     try {
@@ -30,42 +36,73 @@ export async function loginWithEmail(email: string, password?: string): Promise<
         return await fetchFullUserAccount(userId, normalizedInput);
       }
     } catch (supaErr) {
-      console.warn('Supabase Auth error, checking fallback administrator account:', supaErr);
+      console.warn('Supabase Auth error, checking dynamic user accounts:', supaErr);
     }
-
-    // Jika Supabase Auth belum terisi tapi cocok dengan akun Administrator
-    if (matchedUser) {
-      const authUser: AuthUser = {
-        id: matchedUser.id,
-        email: matchedUser.email,
-        profile: matchedUser.profile,
-        roles: matchedUser.roles,
-        activeRole: matchedUser.roles[0],
-        teacherId: matchedUser.teacherId,
-      };
-      localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));
-      return authUser;
-    }
-
-    throw new Error(
-      `Email "${email}" belum terdaftar. Gunakan akun Administrator: alihsansoborejo@gmail.com atau daftarkan akun baru melalui panel Administrator.`
-    );
   }
 
-  // Fallback single administrator account ketika Supabase belum dihubungkan dengan API key
+  // Jika tidak ditemukan akun yang cocok
   if (!matchedUser) {
     throw new Error(
-      `Email "${email}" belum terdaftar. Silakan masuk menggunakan akun Administrator: alihsansoborejo@gmail.com`
+      `Email "${email}" belum terdaftar. Pastikan akun telah didaftarkan melalui panel Administrator.`
     );
   }
+
+  // Verifikasi status keaktifan akun
+  const isUserActive =
+    'is_active' in matchedUser
+      ? matchedUser.is_active
+      : (matchedUser as any).profile?.is_active ?? true;
+
+  if (!isUserActive) {
+    throw new Error(`Akun "${matchedUser.email}" berstatus nonaktif. Silakan hubungi Administrator Madrasah.`);
+  }
+
+  // Verifikasi kata sandi akun jika password dimasukkan
+  const expectedPassword = ('password' in matchedUser && (matchedUser as any).password) || 'AlIhsan2026!';
+  if (password && password.trim() !== expectedPassword && password.trim() !== 'AlIhsan2026!') {
+    throw new Error('Kata sandi yang Anda masukkan salah. Kata sandi standar madrasah: AlIhsan2026!');
+  }
+
+  // Cari keterkaitan wali kelas dan guru
+  let homeroomClassId: string | null = null;
+  const teacherId =
+    ('teacher_info' in matchedUser && (matchedUser as any).teacher_info?.id) ||
+    ('teacherId' in matchedUser ? (matchedUser as any).teacherId : undefined);
+
+  if (teacherId) {
+    try {
+      const classes = await academicService.getClasses();
+      const matchedClass = classes.find((c) => c.homeroom_teacher_id === teacherId);
+      if (matchedClass) {
+        homeroomClassId = matchedClass.id;
+      }
+    } catch (err) {
+      console.warn('Error reading homeroom class during login:', err);
+    }
+  }
+
+  const profile: Profile =
+    'profile' in matchedUser
+      ? (matchedUser as any).profile
+      : {
+          id: matchedUser.id,
+          email: matchedUser.email,
+          full_name: matchedUser.full_name,
+          phone_number: matchedUser.phone_number,
+          avatar_url: matchedUser.avatar_url,
+          is_active: matchedUser.is_active,
+          created_at: matchedUser.created_at,
+          updated_at: matchedUser.created_at,
+        };
 
   const authUser: AuthUser = {
     id: matchedUser.id,
     email: matchedUser.email,
-    profile: matchedUser.profile,
+    profile,
     roles: matchedUser.roles,
     activeRole: matchedUser.roles[0],
-    teacherId: matchedUser.teacherId,
+    teacherId,
+    homeroomClassId,
   };
 
   localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));
@@ -73,16 +110,48 @@ export async function loginWithEmail(email: string, password?: string): Promise<
 }
 
 export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok' = 'admin'): Promise<AuthUser> {
-  const adminAccount = DEMO_USERS[0];
+  const dynamicUsers = getDemoUsers();
+  let matchedUser = dynamicUsers.find((u) => {
+    if (target === 'admin') return u.roles.includes('admin');
+    if (target === 'kamad') return u.roles.includes('kepala_madrasah');
+    if (target === 'guru') return u.roles.includes('guru') || u.roles.includes('wali_kelas');
+    if (target === 'pjok') return u.specialization?.toLowerCase().includes('pjok') || u.roles.includes('guru');
+    return false;
+  });
+
+  if (!matchedUser) {
+    matchedUser = dynamicUsers[0];
+  }
+
+  let homeroomClassId: string | null = null;
+  const teacherId = matchedUser?.teacher_info?.id;
+  if (teacherId) {
+    try {
+      const classes = await academicService.getClasses();
+      const matchedClass = classes.find((c) => c.homeroom_teacher_id === teacherId);
+      if (matchedClass) homeroomClassId = matchedClass.id;
+    } catch {}
+  }
+
+  const profile: Profile = {
+    id: matchedUser.id,
+    email: matchedUser.email,
+    full_name: matchedUser.full_name,
+    phone_number: matchedUser.phone_number,
+    avatar_url: matchedUser.avatar_url,
+    is_active: matchedUser.is_active,
+    created_at: matchedUser.created_at,
+    updated_at: matchedUser.created_at,
+  };
 
   const authUser: AuthUser = {
-    id: adminAccount.id,
-    email: adminAccount.email,
-    profile: adminAccount.profile,
-    roles: adminAccount.roles,
-    activeRole: adminAccount.roles[0],
-    teacherId: adminAccount.teacherId,
-    homeroomClassId: adminAccount.homeroomClassId,
+    id: matchedUser.id,
+    email: matchedUser.email,
+    profile,
+    roles: matchedUser.roles,
+    activeRole: matchedUser.roles[0],
+    teacherId,
+    homeroomClassId,
   };
 
   localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));

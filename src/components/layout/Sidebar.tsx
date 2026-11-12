@@ -26,6 +26,7 @@ import {
   FileCode2,
   ListOrdered,
   LifeBuoy,
+  HardDrive,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -85,6 +86,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               { id: 'master-kelas', label: 'Kelas 1 s.d. 6', icon: School },
               { id: 'master-mapel', label: 'Mata Pelajaran', icon: BookOpen },
               { id: 'penugasan-guru', label: 'Penugasan Mengajar (SK)', icon: ClipboardList },
+              { id: 'penyimpanan-drive', label: 'Penyimpanan Google Drive', icon: HardDrive, badge: 'Cloud' },
               { id: 'migrasi-data', label: 'Pusat Migrasi Data', icon: FileSpreadsheet, badge: 'Impor' },
               { id: 'pengaturan-identitas', label: 'Identitas & Logo', icon: School, badge: 'Tahap 8' },
               { id: 'pengaturan-akademik', label: 'Tahun Ajaran & KKTP', icon: Database },
@@ -109,6 +111,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               { id: 'dashboard', label: 'Dashboard Eksekutif', icon: LayoutDashboard },
               { id: 'supervisi-kbm', label: 'Supervisi Akademik & KBM', icon: Award, badge: 'Tabel/Ekspor' },
               { id: 'arsip-drive', label: 'Telaah Dokumen Kurikulum', icon: FolderSync },
+              { id: 'penyimpanan-drive', label: 'Penyimpanan Google Drive', icon: HardDrive, badge: 'Cloud' },
               { id: 'monitoring-kbm', label: 'Monitoring Jurnal & Presensi', icon: ClipboardList },
             ],
           },
@@ -140,6 +143,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               { id: 'dashboard', label: 'Dashboard Wali Kelas', icon: LayoutDashboard },
               { id: 'presensi', label: 'Presensi Harian Rombel', icon: CalendarCheck, badge: 'Harian' },
               { id: 'siswa-kelas', label: 'Daftar Siswa Kelas', icon: Users },
+              { id: 'penyimpanan-drive', label: 'Penyimpanan Google Drive', icon: HardDrive, badge: 'Cloud' },
               { id: 'monitoring-nilai-mapel', label: 'Monitoring Nilai Mapel', icon: Award },
               { id: 'rekap-presensi-kelas', label: 'Rekap Presensi Rombel', icon: CalendarCheck },
             ],
@@ -553,6 +557,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   PENDUKUNG GURU
                 </p>
                 <div className="mt-1 space-y-1">
+                  <button
+                    onClick={() => handleItemClick('penyimpanan-drive')}
+                    className={`flex items-center justify-between w-full px-3 py-2 text-xs font-medium rounded-lg transition-colors text-left ${
+                      activeView === 'penyimpanan-drive'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <HardDrive className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Penyimpanan Google Drive</span>
+                    </div>
+                    <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500 text-white">
+                      Cloud
+                    </span>
+                  </button>
+
                   <button
                     onClick={() => handleItemClick('bimbingan-siswa')}
                     className={`flex items-center gap-2.5 w-full px-3 py-2 text-xs font-medium rounded-lg transition-colors text-left ${

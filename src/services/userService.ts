@@ -2,6 +2,7 @@ import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 import { Profile, UserRole, ActivityLog, Teacher } from '../types/database.types';
 import { DEMO_USERS, DEMO_TEACHERS } from '../lib/demoData';
 import { academicService } from './academicService';
+import { activityLogService } from './activityLogService';
 
 export interface UserListItem {
   id: string;
@@ -17,6 +18,14 @@ export interface UserListItem {
     nip: string | null;
     specialization: string | null;
   } | null;
+  // Detail kredensial dan sinkronisasi data guru
+  password?: string;
+  title_prefix?: string | null;
+  title_suffix?: string | null;
+  gender?: 'L' | 'P';
+  nip?: string | null;
+  nuptk?: string | null;
+  specialization?: string | null;
 }
 
 export interface CreateUserData {
@@ -26,12 +35,29 @@ export interface CreateUserData {
   password?: string;
   roles: UserRole[];
   teacher_id?: string;
+  // Detail data guru untuk otomatisasi integrasi
+  auto_create_teacher?: boolean;
+  title_prefix?: string;
+  title_suffix?: string;
+  nip?: string;
+  nuptk?: string;
+  gender?: 'L' | 'P';
+  specialization?: string;
+  is_active?: boolean;
 }
 
-// Local persistence storage key for demo users
+export interface BulkImportResult {
+  total: number;
+  success: number;
+  failed: number;
+  errors: string[];
+  createdUsers: UserListItem[];
+}
+
+// Local persistence storage key for users
 const USERS_STORAGE_KEY = 'simpel_users_cache_v2';
 
-function getDemoUsers(): UserListItem[] {
+export function getDemoUsers(): UserListItem[] {
   try {
     const raw = localStorage.getItem(USERS_STORAGE_KEY);
     if (raw) {
@@ -51,6 +77,13 @@ function getDemoUsers(): UserListItem[] {
     is_active: du.profile.is_active,
     created_at: du.profile.created_at,
     roles: du.roles,
+    password: du.password || 'AlIhsan2026!',
+    title_prefix: null,
+    title_suffix: null,
+    gender: 'L',
+    nip: null,
+    nuptk: null,
+    specialization: 'Administrator Sistem',
     teacher_info: du.teacherId
       ? {
           id: du.teacherId,
@@ -67,7 +100,7 @@ function getDemoUsers(): UserListItem[] {
   return initial;
 }
 
-function saveDemoUsers(users: UserListItem[]) {
+export function saveDemoUsers(users: UserListItem[]) {
   try {
     localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
   } catch (e) {
@@ -87,7 +120,7 @@ export async function fetchUsersList(filters?: {
         .select(`
           id, email, full_name, phone_number, avatar_url, is_active, created_at,
           user_roles (role),
-          teachers (id, nip, specialization)
+          teachers (id, nip, nuptk, specialization, gender, title_prefix, title_suffix)
         `)
         .order('created_at', { ascending: false });
 
@@ -115,6 +148,13 @@ export async function fetchUsersList(filters?: {
             is_active: row.is_active,
             created_at: row.created_at,
             roles,
+            password: '••••••••',
+            title_prefix: teacher?.title_prefix || null,
+            title_suffix: teacher?.title_suffix || null,
+            gender: teacher?.gender || 'L',
+            nip: teacher?.nip || null,
+            nuptk: teacher?.nuptk || null,
+            specialization: teacher?.specialization || null,
             teacher_info: teacher ? { id: teacher.id, nip: teacher.nip, specialization: teacher.specialization } : null,
           };
         });
@@ -127,7 +167,7 @@ export async function fetchUsersList(filters?: {
       }
 
       if (error) {
-        console.warn('Supabase fetchUsersList fallback to local demo store:', error.message);
+        console.warn('Supabase fetchUsersList fallback to local store:', error.message);
       }
     } catch (err) {
       console.warn('Supabase query error, fallback to local store:', err);
@@ -173,58 +213,268 @@ export async function fetchTeachersWithoutAccount(): Promise<Teacher[]> {
   }
 
   const allTeachers = await academicService.getTeachers();
-  return allTeachers.filter((t) => !getDemoUsers().some((u) => u.teacher_info?.id === t.id));
+  const existingUsers = getDemoUsers();
+  return allTeachers.filter((t) => !existingUsers.some((u) => u.teacher_info?.id === t.id));
 }
 
-export async function createUserWithRoles(data: CreateUserData, adminId: string): Promise<UserListItem> {
+/**
+ * Membuat Akun Pengguna Baru sekaligus otomatis membuat/menautkan data Tenaga Pendidik (Guru)
+ */
+export async function createUserWithRoles(data: CreateUserData, adminId: string = 'usr-admin-alihsan'): Promise<UserListItem> {
+  if (!data.email || !data.email.trim()) {
+    throw new Error('Alamat email / username wajib diisi.');
+  }
+
+  if (!data.full_name || !data.full_name.trim()) {
+    throw new Error('Nama lengkap wajib diisi.');
+  }
+
   if (data.roles.length === 0) {
     throw new Error('Pilih minimal satu peran untuk akun baru ini.');
   }
 
-  if (isSupabaseConfigured) {
-    try {
-      // Memanggil backend server / Edge Function via RPC atau Auth Invite
-      const { data: result, error } = await supabase.rpc('admin_create_user_with_roles', {
-        p_email: data.email,
-        p_full_name: data.full_name,
-        p_phone: data.phone_number || null,
-        p_roles: data.roles,
-        p_teacher_id: data.teacher_id || null,
-      });
+  const normalizedEmail = data.email.trim().toLowerCase();
+  const currentUsers = getDemoUsers();
 
-      if (!error && result) {
-        return result;
+  // Cek duplikasi email
+  if (currentUsers.some((u) => u.email.toLowerCase() === normalizedEmail)) {
+    throw new Error(`Email "${normalizedEmail}" sudah digunakan oleh akun lain.`);
+  }
+
+  const newUserId = `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  const password = data.password?.trim() || 'AlIhsan2026!';
+
+  // Periksa apakah peran mencakup aspek keguruan / akademik
+  const isTeacherRole = data.roles.some((r) => ['guru', 'wali_kelas', 'kepala_madrasah'].includes(r));
+  const shouldCreateTeacher = data.auto_create_teacher !== false && (isTeacherRole || !!data.specialization || !!data.nip);
+
+  let linkedTeacher: Teacher | null = null;
+
+  // Otomatis sinkronisasi ke Data Guru
+  if (shouldCreateTeacher) {
+    try {
+      const existingTeachers = await academicService.getTeachers();
+      // Cek apakah data guru dengan NIP atau Nama yang sama sudah ada di tabel guru
+      const matchedTeacher = existingTeachers.find(
+        (t) => (data.nip && t.nip === data.nip) || t.full_name.toLowerCase() === data.full_name.toLowerCase().trim()
+      );
+
+      if (matchedTeacher) {
+        // Tautkan akun baru ini ke profil guru yang sudah ada
+        linkedTeacher = await academicService.updateTeacher(matchedTeacher.id, {
+          user_id: newUserId,
+          title_prefix: data.title_prefix !== undefined ? data.title_prefix : matchedTeacher.title_prefix,
+          title_suffix: data.title_suffix !== undefined ? data.title_suffix : matchedTeacher.title_suffix,
+          nip: data.nip || matchedTeacher.nip,
+          nuptk: data.nuptk || matchedTeacher.nuptk,
+          gender: data.gender || matchedTeacher.gender,
+          phone_number: data.phone_number || matchedTeacher.phone_number,
+          specialization: data.specialization || matchedTeacher.specialization,
+          is_active: true,
+        });
+      } else {
+        // Otomatis buat entri data Guru baru
+        linkedTeacher = await academicService.createTeacher({
+          user_id: newUserId,
+          full_name: data.full_name.trim(),
+          title_prefix: data.title_prefix || null,
+          title_suffix: data.title_suffix || null,
+          nip: data.nip || null,
+          nuptk: data.nuptk || null,
+          gender: data.gender || 'L',
+          phone_number: data.phone_number || null,
+          specialization: data.specialization || (data.roles.includes('kepala_madrasah') ? 'Kepala Madrasah' : 'Guru Pengampu'),
+          is_active: true,
+        });
       }
-      console.warn('Supabase admin_create_user_with_roles fallback:', error?.message);
-    } catch (err) {
-      console.warn('Supabase createUserWithRoles error, fallback to local store:', err);
+    } catch (tchErr) {
+      console.warn('Gagal otomatis sinkronisasi guru:', tchErr);
+    }
+  } else if (data.teacher_id) {
+    // Menghubungkan secara manual ke ID guru yang dipilih
+    try {
+      linkedTeacher = await academicService.updateTeacher(data.teacher_id, {
+        user_id: newUserId,
+      });
+    } catch (tchErr) {
+      console.warn('Gagal menghubungkan guru terpilih:', tchErr);
     }
   }
 
-  // Demo Mode Creation
-  const newId = `usr-new-${Date.now()}`;
   const newItem: UserListItem = {
-    id: newId,
-    email: data.email.toLowerCase(),
-    full_name: data.full_name,
+    id: newUserId,
+    email: normalizedEmail,
+    full_name: data.full_name.trim(),
     phone_number: data.phone_number || null,
     avatar_url: null,
     is_active: true,
     created_at: new Date().toISOString(),
     roles: data.roles,
-    teacher_info: data.teacher_id
+    password,
+    title_prefix: data.title_prefix || linkedTeacher?.title_prefix || null,
+    title_suffix: data.title_suffix || linkedTeacher?.title_suffix || null,
+    gender: data.gender || linkedTeacher?.gender || 'L',
+    nip: data.nip || linkedTeacher?.nip || null,
+    nuptk: data.nuptk || linkedTeacher?.nuptk || null,
+    specialization: data.specialization || linkedTeacher?.specialization || null,
+    teacher_info: linkedTeacher
       ? {
-          id: data.teacher_id,
-          nip: DEMO_TEACHERS.find((t) => t.id === data.teacher_id)?.nip || null,
-          specialization: DEMO_TEACHERS.find((t) => t.id === data.teacher_id)?.specialization || null,
+          id: linkedTeacher.id,
+          nip: linkedTeacher.nip,
+          specialization: linkedTeacher.specialization,
         }
       : null,
   };
 
-  const currentUsers = getDemoUsers();
   const updated = [newItem, ...currentUsers];
   saveDemoUsers(updated);
+
+  // Catat ke Log Aktivitas
+  await activityLogService.log({
+    userId: adminId,
+    userName: 'Administrator Madrasah',
+    userRole: 'admin',
+    action: 'CREATE_USER_AND_TEACHER',
+    module: 'Manajemen Akun & Guru',
+    details: `Mendaftarkan akun ${newItem.full_name} (${newItem.email}) dengan peran: ${newItem.roles.join(', ')}${linkedTeacher ? ' (Otomatis masuk Data Guru)' : ''}`,
+  });
+
   return newItem;
+}
+
+/**
+ * Pendaftaran Massal Akun & Guru dari CSV
+ */
+export async function bulkCreateUsersFromCSV(
+  rows: Array<CreateUserData>,
+  adminId: string
+): Promise<BulkImportResult> {
+  let success = 0;
+  let failed = 0;
+  const errors: string[] = [];
+  const createdUsers: UserListItem[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    try {
+      if (!row.email || !row.full_name) {
+        throw new Error(`Baris ${i + 1}: Email dan Nama Lengkap wajib diisi.`);
+      }
+      const created = await createUserWithRoles(row, adminId);
+      createdUsers.push(created);
+      success++;
+    } catch (err: any) {
+      failed++;
+      errors.push(`Baris ${i + 1} (${row.email || row.full_name || 'Tanpa Nama'}): ${err.message}`);
+    }
+  }
+
+  return {
+    total: rows.length,
+    success,
+    failed,
+    errors,
+    createdUsers,
+  };
+}
+
+/**
+ * Memperbarui Akun Pengguna sekaligus menyinkronkan data Guru yang terhubung
+ */
+export async function updateUserAndTeacher(
+  userId: string,
+  payload: {
+    full_name: string;
+    email: string;
+    phone_number?: string | null;
+    password?: string;
+    roles: UserRole[];
+    is_active: boolean;
+    title_prefix?: string | null;
+    title_suffix?: string | null;
+    nip?: string | null;
+    nuptk?: string | null;
+    gender?: 'L' | 'P';
+    specialization?: string | null;
+  }
+): Promise<UserListItem> {
+  const currentUsers = getDemoUsers();
+  const existing = currentUsers.find((u) => u.id === userId);
+  if (!existing) {
+    throw new Error('Data akun pengguna tidak ditemukan.');
+  }
+
+  // Sinkronkan ke Data Guru jika terhubung atau memiliki peran pendidik
+  let linkedTeacherInfo = existing.teacher_info;
+  const isTeacherRole = payload.roles.some((r) => ['guru', 'wali_kelas', 'kepala_madrasah'].includes(r));
+
+  if (existing.teacher_info?.id) {
+    try {
+      const updatedTeacher = await academicService.updateTeacher(existing.teacher_info.id, {
+        full_name: payload.full_name,
+        title_prefix: payload.title_prefix || null,
+        title_suffix: payload.title_suffix || null,
+        nip: payload.nip || null,
+        nuptk: payload.nuptk || null,
+        gender: payload.gender || 'L',
+        phone_number: payload.phone_number || null,
+        specialization: payload.specialization || null,
+        is_active: payload.is_active,
+      });
+      linkedTeacherInfo = {
+        id: updatedTeacher.id,
+        nip: updatedTeacher.nip,
+        specialization: updatedTeacher.specialization,
+      };
+    } catch (err) {
+      console.warn('Gagal sinkronisasi data guru saat update akun:', err);
+    }
+  } else if (isTeacherRole) {
+    // Belum punya profil guru, otomatis buatkan
+    try {
+      const newTeacher = await academicService.createTeacher({
+        user_id: userId,
+        full_name: payload.full_name,
+        title_prefix: payload.title_prefix || null,
+        title_suffix: payload.title_suffix || null,
+        nip: payload.nip || null,
+        nuptk: payload.nuptk || null,
+        gender: payload.gender || 'L',
+        phone_number: payload.phone_number || null,
+        specialization: payload.specialization || 'Guru Pengampu',
+        is_active: payload.is_active,
+      });
+      linkedTeacherInfo = {
+        id: newTeacher.id,
+        nip: newTeacher.nip,
+        specialization: newTeacher.specialization,
+      };
+    } catch (err) {
+      console.warn('Gagal otomatisasi profil guru baru saat update:', err);
+    }
+  }
+
+  const updatedUser: UserListItem = {
+    ...existing,
+    full_name: payload.full_name,
+    email: payload.email.toLowerCase().trim(),
+    phone_number: payload.phone_number || null,
+    password: payload.password || existing.password || 'AlIhsan2026!',
+    roles: payload.roles,
+    is_active: payload.is_active,
+    title_prefix: payload.title_prefix || null,
+    title_suffix: payload.title_suffix || null,
+    gender: payload.gender || 'L',
+    nip: payload.nip || null,
+    nuptk: payload.nuptk || null,
+    specialization: payload.specialization || null,
+    teacher_info: linkedTeacherInfo,
+  };
+
+  const updatedList = currentUsers.map((u) => (u.id === userId ? updatedUser : u));
+  saveDemoUsers(updatedList);
+
+  return updatedUser;
 }
 
 export async function updateUserRolesAndStatus(
@@ -236,124 +486,86 @@ export async function updateUserRolesAndStatus(
     throw new Error('Pengguna wajib memiliki minimal satu peran.');
   }
 
-  if (isSupabaseConfigured) {
+  const currentUsers = getDemoUsers();
+  const existing = currentUsers.find((u) => u.id === userId);
+  if (!existing) return;
+
+  await updateUserAndTeacher(userId, {
+    full_name: existing.full_name,
+    email: existing.email,
+    phone_number: existing.phone_number,
+    password: existing.password,
+    roles,
+    is_active: isActive,
+    title_prefix: existing.title_prefix,
+    title_suffix: existing.title_suffix,
+    nip: existing.nip,
+    nuptk: existing.nuptk,
+    gender: existing.gender,
+    specialization: existing.specialization,
+  });
+}
+
+/**
+ * Menghapus akun pengguna dan memutuskan tautan guru
+ */
+export async function deleteUser(userId: string): Promise<void> {
+  const currentUsers = getDemoUsers();
+  const user = currentUsers.find((u) => u.id === userId);
+  if (!user) return;
+
+  if (user.email.toLowerCase() === 'alihsansoborejo@gmail.com') {
+    throw new Error('Akun Administrator utama madrasah tidak dapat dihapus.');
+  }
+
+  // Jika memiliki profil guru yang dibuatkan, hapus data gurunya
+  if (user.teacher_info?.id) {
     try {
-      // 1. Update status di profiles
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .update({ is_active: isActive })
-        .eq('id', userId);
-
-      if (!profileError) {
-        // 2. Refresh roles di user_roles
-        await supabase.from('user_roles').delete().eq('user_id', userId);
-
-        const inserts = roles.map((r, idx) => ({
-          user_id: userId,
-          role: r,
-          is_primary: idx === 0,
-        }));
-
-        const { error: rolesError } = await supabase.from('user_roles').insert(inserts);
-        if (!rolesError) return;
-        console.warn('Supabase insert user_roles error:', rolesError.message);
-      } else {
-        console.warn('Supabase update profile error:', profileError.message);
-      }
+      await academicService.deleteTeacher(user.teacher_info.id);
     } catch (err) {
-      console.warn('Supabase updateUserRolesAndStatus error:', err);
+      console.warn('Gagal menghapus data guru tertaut:', err);
     }
   }
 
-  // Update in demo store
-  const currentUsers = getDemoUsers();
-  const updated = currentUsers.map((u) => {
-    if (u.id === userId) {
-      return {
-        ...u,
-        is_active: isActive,
-        roles,
-      };
-    }
-    return u;
+  const remaining = currentUsers.filter((u) => u.id !== userId);
+  saveDemoUsers(remaining);
+
+  await activityLogService.log({
+    userName: 'Administrator Madrasah',
+    userRole: 'admin',
+    action: 'DELETE_USER',
+    module: 'Manajemen Akun & Guru',
+    details: `Menghapus akun ${user.full_name} (${user.email}) beserta tautan guru`,
   });
-  saveDemoUsers(updated);
 }
 
 export async function fetchRecentActivityLogs(limit: number = 10): Promise<ActivityLog[]> {
-  if (isSupabaseConfigured) {
-    const { data } = await supabase
-      .from('activity_logs')
-      .select('*, profile:profiles(full_name, email)')
-      .order('created_at', { ascending: false })
-      .limit(limit);
-    return data || [];
-  }
+  try {
+    const logs = await activityLogService.getRecentLogs(limit);
+    if (logs.length > 0) {
+      return logs.map((l) => ({
+        id: l.id,
+        user_id: l.userId || 'usr-admin',
+        action_name: l.action,
+        entity_name: l.module,
+        entity_id: l.id,
+        details: { description: l.details },
+        ip_address: l.ip || '127.0.0.1',
+        user_agent: 'SIMPEL Madrasah App',
+        created_at: l.timestamp,
+        profile: {
+          id: l.userId || 'usr-admin',
+          full_name: l.userName,
+          email: l.userRole === 'admin' ? 'alihsansoborejo@gmail.com' : `${l.userName.toLowerCase().replace(/[^a-z0-9]/g, '')}@alihsan.sch.id`,
+          phone_number: null,
+          avatar_url: null,
+          is_active: true,
+          created_at: l.timestamp,
+          updated_at: l.timestamp,
+        },
+      }));
+    }
+  } catch {}
 
-  // Demo logs
-  return [
-    {
-      id: 'log-1',
-      user_id: 'usr-admin',
-      action_name: 'UPDATE_ROLES',
-      entity_name: 'user_roles',
-      entity_id: 'usr-guru-1',
-      details: { role_added: 'wali_kelas', class: 'Kelas 4' },
-      ip_address: '127.0.0.1',
-      user_agent: 'Chrome/126 (Windows NT 10)',
-      created_at: new Date(Date.now() - 1000 * 60 * 25).toISOString(),
-      profile: {
-        id: 'usr-admin',
-        full_name: 'Admin SIMPEL MI Al Ihsan',
-        email: 'admin@alihsan.sch.id',
-        phone_number: null,
-        avatar_url: null,
-        is_active: true,
-        created_at: '',
-        updated_at: '',
-      },
-    },
-    {
-      id: 'log-2',
-      user_id: 'usr-kamad',
-      action_name: 'REVIEW_DOCUMENT',
-      entity_name: 'document_reviews',
-      entity_id: 'doc-001',
-      details: { status: 'Disetujui', title: 'Modul Ajar Fikih Bab 2' },
-      ip_address: '127.0.0.1',
-      user_agent: 'Chrome/126 (Windows NT 10)',
-      created_at: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
-      profile: {
-        id: 'usr-kamad',
-        full_name: 'Drs. H. Ahmad Ihsan, M.Pd.I',
-        email: 'kamad@alihsan.sch.id',
-        phone_number: null,
-        avatar_url: null,
-        is_active: true,
-        created_at: '',
-        updated_at: '',
-      },
-    },
-    {
-      id: 'log-3',
-      user_id: 'usr-guru-1',
-      action_name: 'SUBMIT_ATTENDANCE',
-      entity_name: 'student_attendance',
-      entity_id: 'cls-4',
-      details: { class_name: 'Kelas 4', total_present: 27, sick: 1 },
-      ip_address: '127.0.0.1',
-      user_agent: 'Mobile Safari/17.4 (iPhone)',
-      created_at: new Date(Date.now() - 1000 * 60 * 300).toISOString(),
-      profile: {
-        id: 'usr-guru-1',
-        full_name: 'Ust. Ahmad Fauzi, S.Pd.I',
-        email: 'guru@alihsan.sch.id',
-        phone_number: null,
-        avatar_url: null,
-        is_active: true,
-        created_at: '',
-        updated_at: '',
-      },
-    },
-  ];
+  return [];
 }

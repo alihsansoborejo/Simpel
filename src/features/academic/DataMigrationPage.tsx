@@ -15,6 +15,7 @@ import {
   BookOpen,
 } from 'lucide-react';
 import { academicService } from '../../services/academicService';
+import { createUserWithRoles } from '../../services/userService';
 
 type ImportCategory = 'guru' | 'siswa' | 'kelas' | 'mapel' | 'penugasan';
 
@@ -235,18 +236,36 @@ export const DataMigrationPage: React.FC = () => {
 
             successCount++;
           } else if (selectedCategory === 'guru') {
-            await academicService.createTeacher({
-              user_id: null,
-              title_prefix: row.data['Gelar_Depan'] || null,
-              full_name: row.data['Nama_Lengkap'],
-              title_suffix: row.data['Gelar_Belakang'] || null,
-              nip: row.data['NIP'] || null,
-              nuptk: row.data['NUPTK'] || null,
-              gender: (row.data['JK']?.toUpperCase() === 'P' ? 'P' : 'L'),
-              phone_number: row.data['Telepon'] || null,
-              specialization: row.data['Spesialisasi'] || null,
-              is_active: true,
-            });
+            const email = row.data['Email_Akun']?.trim();
+            if (email) {
+              await createUserWithRoles({
+                email,
+                full_name: row.data['Nama_Lengkap'],
+                password: 'AlIhsan2026!',
+                title_prefix: row.data['Gelar_Depan'] || undefined,
+                title_suffix: row.data['Gelar_Belakang'] || undefined,
+                nip: row.data['NIP'] || undefined,
+                nuptk: row.data['NUPTK'] || undefined,
+                gender: (row.data['JK']?.toUpperCase() === 'P' ? 'P' : 'L'),
+                phone_number: row.data['Telepon'] || undefined,
+                specialization: row.data['Spesialisasi'] || undefined,
+                roles: ['guru'],
+                is_active: true,
+              });
+            } else {
+              await academicService.createTeacher({
+                user_id: null,
+                title_prefix: row.data['Gelar_Depan'] || null,
+                full_name: row.data['Nama_Lengkap'],
+                title_suffix: row.data['Gelar_Belakang'] || null,
+                nip: row.data['NIP'] || null,
+                nuptk: row.data['NUPTK'] || null,
+                gender: (row.data['JK']?.toUpperCase() === 'P' ? 'P' : 'L'),
+                phone_number: row.data['Telepon'] || null,
+                specialization: row.data['Spesialisasi'] || null,
+                is_active: true,
+              });
+            }
             successCount++;
           }
         } catch (err) {
