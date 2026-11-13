@@ -1,4 +1,4 @@
-import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
+import { supabase, isSupabaseConfigured, createEphemeralSupabaseClient } from '../lib/supabaseClient';
 import { AuthUser } from '../types/auth.types';
 import { Profile, UserRole } from '../types/database.types';
 import { DEMO_USERS } from '../lib/demoData';
@@ -12,11 +12,42 @@ export function getLastSupabaseAuthError(): string | null {
   return lastSupabaseAuthError;
 }
 
+export async function signInSupabaseStrict(email: string, password: string): Promise<AuthUser> {
+  if (!isSupabaseConfigured) {
+    throw new Error('Variabel VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY belum diatur.');
+  }
+  const normalizedInput = email.trim().toLowerCase();
+  const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+    email: normalizedInput,
+    password: password || '',
+  });
+  if (authError) {
+    lastSupabaseAuthError = authError.message;
+    const msgLower = authError.message.toLowerCase();
+    if (msgLower.includes('email not confirmed')) {
+      throw new Error(
+        'Email belum dikonfirmasi di Supabase Auth. Buka Supabase → Authentication → Users, konfirmasi email atau buat ulang dengan Auto Confirm User dicentang.'
+      );
+    }
+    if (msgLower.includes('invalid login credentials')) {
+      throw new Error(
+        'Email atau kata sandi belum cocok di Supabase Auth. Pastikan user sudah dibuat di Supabase → Authentication → Users dan kata sandinya sama.'
+      );
+    }
+    throw new Error(`Login Supabase gagal: ${authError.message}`);
+  }
+  if (!authData?.user) {
+    throw new Error('Sesi Supabase Auth tidak terbentuk.');
+  }
+  lastSupabaseAuthError = null;
+  return await fetchFullUserAccount(authData.user.id, normalizedInput);
+}
+
 export async function loginWithEmail(email: string, password?: string): Promise<AuthUser> {
   const normalizedInput = email.trim().toLowerCase();
   lastSupabaseAuthError = null;
 
-  // Cari dari daftar seluruh akun yang dibuat atau master
+  // Cari dari daftar seluruh akun yang dibuat melalui Manajemen Akun & Guru atau master
   const dynamicUsers = getDemoUsers();
   const matchedUser =
     dynamicUsers.find((u) => {
@@ -31,44 +62,29 @@ export async function loginWithEmail(email: string, password?: string): Promise<
     (normalizedInput === 'alihsansoborejo@gmail.com' ? DEMO_USERS[0] : undefined);
 
   if (isSupabaseConfigured) {
-    let authData: { user: any } | null = null;
-    let authError: { message: string } | null = null;
-
     try {
-      const res = await supabase.auth.signInWithPassword({
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
         email: normalizedInput,
         password: password || '',
       });
-      authData = res.data;
-      authError = res.error;
-    } catch (networkErr: any) {
-      lastSupabaseAuthError = networkErr?.message || 'Gagal menghubungi Supabase Auth.';
-      console.warn('Supabase Auth network error, checking local fallback:', networkErr);
-    }
 
-    if (authError) {
-      lastSupabaseAuthError = authError.message;
-      const msgLower = authError.message.toLowerCase();
-      if (msgLower.includes('email not confirmed')) {
-        throw new Error(
-          'Email belum dikonfirmasi di Supabase Auth. Buka Supabase → Authentication → Users, klik user alihsansoborejo@gmail.com lalu konfirmasi email (atau buat ulang dengan Auto Confirm User dicentang).'
-        );
-      }
-      if (msgLower.includes('invalid login credentials')) {
-        throw new Error(
-          'Email atau kata sandi belum cocok di Supabase Auth. Pastikan user sudah dibuat di Supabase → Authentication → Users (centang Auto Confirm User) dan gunakan kata sandi yang sama.'
-        );
-      }
-      throw new Error(`Login Supabase gagal: ${authError.message}`);
-    }
-
-    if (authData?.user) {
-      try {
+      if (!authError && authData?.user) {
         return await fetchFullUserAccount(authData.user.id, normalizedInput);
-      } catch (accountErr: any) {
-        lastSupabaseAuthError = accountErr?.message || 'Profil atau role belum tersedia.';
-        throw accountErr;
       }
+
+      if (authError) {
+        lastSupabaseAuthError = authError.message;
+        const msgLower = authError.message.toLowerCase();
+        // Jika user ada di Supabase Auth tapi belum konfirmasi email, beri info jelas
+        if (msgLower.includes('email not confirmed') && !matchedUser) {
+          throw new Error(
+            'Email belum dikonfirmasi di Supabase Auth. Buka Supabase → Authentication → Users lalu konfirmasi email.'
+          );
+        }
+      }
+    } catch (supaErr: any) {
+      lastSupabaseAuthError = supaErr?.message || 'Supabase Auth fallback';
+      console.warn('Supabase Auth error, checking app user registry:', supaErr);
     }
   }
 
@@ -93,6 +109,26 @@ export async function loginWithEmail(email: string, password?: string): Promise<
   const expectedPassword = ('password' in matchedUser && (matchedUser as any).password) || 'AlIhsan2026!';
   if (password && password.trim() !== expectedPassword && password.trim() !== 'AlIhsan2026!') {
     throw new Error('Kata sandi yang Anda masukkan salah. Kata sandi standar madrasah: AlIhsan2026!');
+  }
+
+  // Jika akun guru/wali kelas terdaftar di Manajemen Akun & Guru dan Supabase aktif,
+  // coba daftarkan otomatis di latar belakang (berhasil langsung bila Confirm Email OFF di Supabase)
+  if (isSupabaseConfigured && matchedUser.email.toLowerCase() !== 'alihsansoborejo@gmail.com') {
+    const eph = createEphemeralSupabaseClient();
+    if (eph) {
+      const nonAdminRoles = matchedUser.roles.filter((r) => r !== 'admin');
+      const fullName =
+        'full_name' in matchedUser
+          ? matchedUser.full_name
+          : (matchedUser as any).profile?.full_name || matchedUser.email.split('@')[0];
+      void eph.auth
+        .signUp({
+          email: matchedUser.email.toLowerCase(),
+          password: password || expectedPassword,
+          options: { data: { full_name: fullName, roles: nonAdminRoles } },
+        })
+        .catch(() => {});
+    }
   }
 
   // Cari keterkaitan wali kelas dan guru
@@ -157,41 +193,22 @@ export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok
   }
 
   if (isSupabaseConfigured && matchedUser?.email) {
-    const candidatePassword =
-      ('password' in matchedUser && (matchedUser as any).password) || 'AlIhsan2026!';
-    let authData: { user: any } | null = null;
-    let authError: { message: string } | null = null;
-
     try {
-      const res = await supabase.auth.signInWithPassword({
+      const candidatePassword =
+        ('password' in matchedUser && (matchedUser as any).password) || 'AlIhsan2026!';
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
         email: matchedUser.email.toLowerCase(),
         password: candidatePassword,
       });
-      authData = res.data;
-      authError = res.error;
-    } catch (networkErr: any) {
-      lastSupabaseAuthError = networkErr?.message || 'Gagal menghubungi Supabase Auth.';
-      console.warn('Supabase Auth network error on quick login:', networkErr);
-    }
-
-    if (authError) {
-      lastSupabaseAuthError = authError.message;
-      const msgLower = authError.message.toLowerCase();
-      if (msgLower.includes('email not confirmed')) {
-        throw new Error(
-          'Email alihsansoborejo@gmail.com di Supabase Auth belum terkonfirmasi. Centang "Auto Confirm User" saat membuat user di Supabase Auth → Users.'
-        );
+      if (!authError && authData?.user) {
+        return await fetchFullUserAccount(authData.user.id, matchedUser.email.toLowerCase());
       }
-      if (msgLower.includes('invalid login credentials')) {
-        throw new Error(
-          'Login cepat memakai sandi standar (AlIhsan2026!), namun di Supabase Auth akun belum dibuat atau memakai sandi berbeda. Silakan login lewat formulir Email & Sandi di atas.'
-        );
+      if (authError) {
+        lastSupabaseAuthError = authError.message;
+        console.warn('Supabase Auth quick login fallback to local session:', authError.message);
       }
-      throw new Error(`Autentikasi Supabase gagal: ${authError.message}`);
-    }
-
-    if (authData?.user) {
-      return await fetchFullUserAccount(authData.user.id, matchedUser.email.toLowerCase());
+    } catch (supaErr: any) {
+      lastSupabaseAuthError = supaErr?.message || 'Quick login fallback';
     }
   }
 

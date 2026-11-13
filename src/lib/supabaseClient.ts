@@ -35,6 +35,17 @@ export const supabase = isSupabaseConfigured
     })
   : createClient('https://mock-placeholder.supabase.co', 'mock-anon-key-placeholder');
 
+export function createEphemeralSupabaseClient() {
+  if (!isSupabaseConfigured) return null;
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
+
 export const getSupabaseConfigStatus = () => ({
   isConfigured: isSupabaseConfigured,
   hasUrl: Boolean(supabaseUrl && supabaseUrl.startsWith('https://') && !supabaseUrl.includes('your-project-id')),

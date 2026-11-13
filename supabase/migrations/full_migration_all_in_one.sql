@@ -70,12 +70,17 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
     address TEXT DEFAULT 'Soborejo, Kec. Pringsurat, Kab. Temanggung, Jawa Tengah',
     principal_name TEXT DEFAULT 'Drs. H. Ahmad Ihsan, M.Pd.I',
     principal_nip TEXT DEFAULT '197508122005011003',
+    logo_url TEXT,
+    favicon_url TEXT,
     active_academic_year_id UUID,
     active_semester_id UUID,
     kktp_default NUMERIC(5,2) NOT NULL DEFAULT 75.00,
     is_report_card_locked BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
+
+ALTER TABLE public.system_settings ADD COLUMN IF NOT EXISTS logo_url TEXT;
+ALTER TABLE public.system_settings ADD COLUMN IF NOT EXISTS favicon_url TEXT;
 
 CREATE TABLE IF NOT EXISTS public.academic_years (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -625,13 +630,19 @@ CREATE TABLE IF NOT EXISTS public.student_guidance_records (
 -- NOTIFIKASI, AI & AUDIT LOGS
 CREATE TABLE IF NOT EXISTS public.notifications (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    recipient_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    recipient_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+    target_role TEXT DEFAULT 'semua',
+    category TEXT DEFAULT 'akademik',
     title TEXT NOT NULL,
     message TEXT NOT NULL,
     action_url TEXT,
     is_read BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
+
+ALTER TABLE public.notifications ALTER COLUMN recipient_id DROP NOT NULL;
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS target_role TEXT DEFAULT 'semua';
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'akademik';
 
 CREATE TABLE IF NOT EXISTS public.ai_generations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -667,6 +678,11 @@ CREATE INDEX IF NOT EXISTS idx_report_cards_student_sem ON public.report_cards(s
 CREATE INDEX IF NOT EXISTS idx_doc_links_teacher_status ON public.document_links(teacher_id, status);
 CREATE INDEX IF NOT EXISTS idx_guidance_student ON public.student_guidance_records(student_id);
 CREATE INDEX IF NOT EXISTS idx_activity_logs_created ON public.activity_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_supervision_teacher_date ON public.supervision_records(teacher_id, supervision_date);
+CREATE INDEX IF NOT EXISTS idx_supervision_year_sem ON public.supervision_records(academic_year_id, semester_id);
+CREATE INDEX IF NOT EXISTS idx_supervision_type ON public.supervision_records(supervision_type);
+CREATE INDEX IF NOT EXISTS idx_supervision_results_record ON public.supervision_results(supervision_record_id);
+CREATE INDEX IF NOT EXISTS idx_supervision_followups_record ON public.supervision_followups(supervision_record_id);
 
 -- ==========================================
 -- BAGIAN 4: FUNCTIONS & TRIGGERS
@@ -683,8 +699,9 @@ DO $$
 DECLARE
     tbl text;
     tables text[] := ARRAY[
-        'profiles', 'teachers', 'students', 'teaching_journals',
-        'grades', 'final_grades', 'document_links', 'student_guidance_records'
+        'system_settings', 'profiles', 'teachers', 'students', 'teaching_journals',
+        'grades', 'final_grades', 'document_links', 'student_guidance_records',
+        'supervision_instruments', 'supervision_records', 'supervision_followups'
     ];
 BEGIN
     FOREACH tbl IN ARRAY tables LOOP
@@ -699,6 +716,9 @@ END $$;
 
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
+DECLARE
+    role_val text;
+    idx int := 0;
 BEGIN
     INSERT INTO public.profiles (id, email, full_name, avatar_url, is_active)
     VALUES (
@@ -712,6 +732,27 @@ BEGIN
     SET email = EXCLUDED.email,
         full_name = EXCLUDED.full_name;
 
+    IF lower(NEW.email) = 'alihsansoborejo@gmail.com' THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (NEW.id, 'admin', TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    ELSIF jsonb_typeof(NEW.raw_user_meta_data->'roles') = 'array' THEN
+        FOR role_val IN SELECT jsonb_array_elements_text(NEW.raw_user_meta_data->'roles') LOOP
+            IF role_val IN ('guru', 'wali_kelas', 'kepala_madrasah') THEN
+                INSERT INTO public.user_roles (user_id, role, is_primary)
+                VALUES (NEW.id, role_val::user_role_type, idx = 0)
+                ON CONFLICT (user_id, role) DO NOTHING;
+                idx := idx + 1;
+            END IF;
+        END LOOP;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = NEW.id) THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (NEW.id, 'guru', TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    END IF;
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -720,6 +761,25 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
 AFTER INSERT ON auth.users
 FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Sinkronisasi akun auth.users yang sudah telanjur dibuat sebelum skrip SQL dijalankan
+INSERT INTO public.profiles (id, email, full_name, avatar_url, is_active)
+SELECT
+    au.id,
+    au.email,
+    COALESCE(au.raw_user_meta_data->>'full_name', split_part(au.email, '@', 1)),
+    au.raw_user_meta_data->>'avatar_url',
+    TRUE
+FROM auth.users au
+WHERE au.email IS NOT NULL
+ON CONFLICT (id) DO UPDATE
+SET email = EXCLUDED.email;
+
+INSERT INTO public.user_roles (user_id, role, is_primary)
+SELECT au.id, 'admin'::user_role_type, TRUE
+FROM auth.users au
+WHERE lower(au.email) = 'alihsansoborejo@gmail.com'
+ON CONFLICT (user_id, role) DO NOTHING;
 
 -- HELPER FUNCTIONS FOR RLS
 CREATE OR REPLACE FUNCTION public.has_role(target_role user_role_type)
@@ -891,6 +951,26 @@ CREATE TRIGGER tr_enforce_grade_lock
 BEFORE UPDATE OR DELETE ON public.grades
 FOR EACH ROW EXECUTE FUNCTION public.enforce_grade_lock();
 
+-- SUPERVISION LOCK TRIGGER
+CREATE OR REPLACE FUNCTION public.enforce_supervision_lock()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.is_finalized = TRUE AND NOT public.is_admin() THEN
+        IF (NEW.total_score IS DISTINCT FROM OLD.total_score OR 
+            NEW.recommendations IS DISTINCT FROM OLD.recommendations OR
+            NEW.strengths IS DISTINCT FROM OLD.strengths) THEN
+            RAISE EXCEPTION 'Akses ditolak: Hasil supervisi ini telah disahkan dan berstatus final.';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS tr_enforce_supervision_lock ON public.supervision_records;
+CREATE TRIGGER tr_enforce_supervision_lock
+BEFORE UPDATE ON public.supervision_records
+FOR EACH ROW EXECUTE FUNCTION public.enforce_supervision_lock();
+
 -- ==========================================
 -- BAGIAN 5: ROW LEVEL SECURITY (RLS) POLICIES
 -- ==========================================
@@ -906,8 +986,9 @@ DECLARE
         'teaching_journals', 'student_attendance', 'learning_evidence', 'learning_progress',
         'assessments', 'assessment_components', 'grades', 'grade_audit_logs',
         'remedial_records', 'enrichment_records', 'final_grades', 'student_descriptions', 'report_cards',
-        'document_links', 'document_link_versions', 'document_reviews', 'supervision_records',
-        'student_guidance_records', 'notifications', 'ai_generations', 'activity_logs'
+        'document_links', 'document_link_versions', 'document_reviews', 'supervision_instruments',
+        'supervision_aspects', 'supervision_indicators', 'supervision_records', 'supervision_results',
+        'supervision_followups', 'student_guidance_records', 'notifications', 'ai_generations', 'activity_logs'
     ];
 BEGIN
     FOREACH tbl IN ARRAY tables LOOP
@@ -968,7 +1049,7 @@ BEGIN
         EXECUTE format('
             DROP POLICY IF EXISTS %I_read_auth ON public.%I;
             CREATE POLICY %I_read_auth ON public.%I FOR SELECT TO authenticated USING (TRUE);
-        ', tbl, tbl);
+        ', tbl, tbl, tbl, tbl);
     END LOOP;
 END $$;
 
@@ -1147,30 +1228,37 @@ CREATE POLICY "doc_reviews_write" ON public.document_reviews
     WITH CHECK (public.is_principal() OR public.is_admin());
 
 -- MODUL SUPERVISI TERSTRUKTUR POLICIES
+DROP POLICY IF EXISTS "supervision_instruments_read" ON public.supervision_instruments;
 CREATE POLICY "supervision_instruments_read" ON public.supervision_instruments
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_instruments_manage" ON public.supervision_instruments;
 CREATE POLICY "supervision_instruments_manage" ON public.supervision_instruments
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
     WITH CHECK (public.is_admin() OR public.has_role('kepala_madrasah'));
 
+DROP POLICY IF EXISTS "supervision_aspects_read" ON public.supervision_aspects;
 CREATE POLICY "supervision_aspects_read" ON public.supervision_aspects
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_aspects_manage" ON public.supervision_aspects;
 CREATE POLICY "supervision_aspects_manage" ON public.supervision_aspects
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
     WITH CHECK (public.is_admin() OR public.has_role('kepala_madrasah'));
 
+DROP POLICY IF EXISTS "supervision_indicators_read" ON public.supervision_indicators;
 CREATE POLICY "supervision_indicators_read" ON public.supervision_indicators
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_indicators_manage" ON public.supervision_indicators;
 CREATE POLICY "supervision_indicators_manage" ON public.supervision_indicators
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
     WITH CHECK (public.is_admin() OR public.has_role('kepala_madrasah'));
 
+DROP POLICY IF EXISTS "supervision_records_select" ON public.supervision_records;
 CREATE POLICY "supervision_records_select" ON public.supervision_records
     FOR SELECT TO authenticated
     USING (
@@ -1178,10 +1266,12 @@ CREATE POLICY "supervision_records_select" ON public.supervision_records
         OR (teacher_id = public.get_current_teacher_id() AND is_shared_with_teacher = TRUE)
     );
 
+DROP POLICY IF EXISTS "supervision_records_insert" ON public.supervision_records;
 CREATE POLICY "supervision_records_insert" ON public.supervision_records
     FOR INSERT TO authenticated
     WITH CHECK (public.is_principal());
 
+DROP POLICY IF EXISTS "supervision_records_update" ON public.supervision_records;
 CREATE POLICY "supervision_records_update" ON public.supervision_records
     FOR UPDATE TO authenticated
     USING (
@@ -1193,10 +1283,12 @@ CREATE POLICY "supervision_records_update" ON public.supervision_records
         OR (teacher_id = public.get_current_teacher_id() AND is_shared_with_teacher = TRUE)
     );
 
+DROP POLICY IF EXISTS "supervision_records_delete" ON public.supervision_records;
 CREATE POLICY "supervision_records_delete" ON public.supervision_records
     FOR DELETE TO authenticated
     USING (public.is_admin());
 
+DROP POLICY IF EXISTS "supervision_results_select" ON public.supervision_results;
 CREATE POLICY "supervision_results_select" ON public.supervision_results
     FOR SELECT TO authenticated
     USING (
@@ -1209,11 +1301,13 @@ CREATE POLICY "supervision_results_select" ON public.supervision_results
         )
     );
 
+DROP POLICY IF EXISTS "supervision_results_manage" ON public.supervision_results;
 CREATE POLICY "supervision_results_manage" ON public.supervision_results
     FOR ALL TO authenticated
     USING (public.is_principal())
     WITH CHECK (public.is_principal());
 
+DROP POLICY IF EXISTS "supervision_followups_select" ON public.supervision_followups;
 CREATE POLICY "supervision_followups_select" ON public.supervision_followups
     FOR SELECT TO authenticated
     USING (
@@ -1226,6 +1320,7 @@ CREATE POLICY "supervision_followups_select" ON public.supervision_followups
         )
     );
 
+DROP POLICY IF EXISTS "supervision_followups_manage" ON public.supervision_followups;
 CREATE POLICY "supervision_followups_manage" ON public.supervision_followups
     FOR ALL TO authenticated
     USING (
@@ -1266,8 +1361,8 @@ CREATE POLICY "guidance_update_own" ON public.student_guidance_records
 DROP POLICY IF EXISTS "notifications_own" ON public.notifications;
 CREATE POLICY "notifications_own" ON public.notifications
     FOR ALL TO authenticated
-    USING (recipient_id = auth.uid())
-    WITH CHECK (recipient_id = auth.uid());
+    USING (recipient_id = auth.uid() OR recipient_id IS NULL)
+    WITH CHECK (recipient_id = auth.uid() OR recipient_id IS NULL);
 
 DROP POLICY IF EXISTS "ai_generations_own" ON public.ai_generations;
 CREATE POLICY "ai_generations_own" ON public.ai_generations
@@ -1297,7 +1392,8 @@ INSERT INTO public.system_settings (
     principal_nip,
     kktp_default,
     is_report_card_locked
-) VALUES (
+)
+SELECT
     'MI Ma’arif Al Ihsan Soborejo',
     '111233080000',
     '60700000',
@@ -1306,7 +1402,7 @@ INSERT INTO public.system_settings (
     '197508122005011003',
     75.00,
     FALSE
-) ON CONFLICT DO NOTHING;
+WHERE NOT EXISTS (SELECT 1 FROM public.system_settings);
 
 INSERT INTO public.academic_years (id, name, start_date, end_date, is_active)
 VALUES 
@@ -1381,3 +1477,63 @@ INSERT INTO public.homeroom_assignments (teacher_id, class_id, academic_year_id)
 VALUES
     ('d0000000-0000-0000-0000-000000000002', 'c0000000-0000-0000-0000-000000000004', 'a0000000-0000-0000-0000-000000000001')
 ON CONFLICT (class_id, academic_year_id) DO NOTHING;
+
+-- INSTRUMEN DEFAULT SUPERVISI MI MA'ARIF AL IHSAN
+INSERT INTO public.supervision_instruments (
+    id, name, supervision_type, description, scale_min, scale_max, scale_type, is_active
+) VALUES (
+    'f0000000-0000-0000-0000-000000000001',
+    'Instrumen Observasi KBM Pembelajaran Mendalam & Berbasis Cinta',
+    'Pelaksanaan_KBM',
+    'Standar evaluasi supervisi klinis dan pembelajaran mendalam berkarakter ke-Ma’arif-an',
+    1, 4, '1-4', TRUE
+) ON CONFLICT DO NOTHING;
+
+INSERT INTO public.supervision_aspects (id, instrument_id, name, order_index, weight, description)
+VALUES
+    ('f1000000-0000-0000-0000-000000000001', 'f0000000-0000-0000-0000-000000000001', 'Perencanaan Pembelajaran', 1, 1.00, 'Kesiapan Modul Ajar, TP, ATP, dan media'),
+    ('f1000000-0000-0000-0000-000000000002', 'f0000000-0000-0000-0000-000000000001', 'Pelaksanaan Pembelajaran Mendalam (Deep Learning)', 2, 1.50, 'Aktivitas pemahaman bermakna, berpikir kritis, dan kolaborasi'),
+    ('f1000000-0000-0000-0000-000000000003', 'f0000000-0000-0000-0000-000000000001', 'Penerapan Kurikulum Berbasis Cinta', 3, 1.50, 'Iklim kasih sayang, penghargaan pada siswa, dan akhlak karimah'),
+    ('f1000000-0000-0000-0000-000000000004', 'f0000000-0000-0000-0000-000000000001', 'Pengelolaan Kelas & Interaksi', 4, 1.00, 'Kondusifitas ruang belajar dan manajemen waktu'),
+    ('f1000000-0000-0000-0000-000000000005', 'f0000000-0000-0000-0000-000000000001', 'Asesmen Formatif & Refleksi', 5, 1.00, 'Umpan balik langsung dan refleksi bersama murid')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO public.supervision_indicators (id, aspect_id, code, name, description, order_index, max_score)
+VALUES
+    ('f2000000-0000-0000-0000-000000000101', 'f1000000-0000-0000-0000-000000000001', '1.1', 'Kesesuaian TP dengan Karakteristik Siswa', 'Tujuan pembelajaran jelas dan terukur', 1, 4.00),
+    ('f2000000-0000-0000-0000-000000000102', 'f1000000-0000-0000-0000-000000000001', '1.2', 'Kesiapan Lembar Kerja Peserta Didik (LKPD)', 'LKPD memfasilitasi eksplorasi mandiri', 2, 4.00),
+    ('f2000000-0000-0000-0000-000000000201', 'f1000000-0000-0000-0000-000000000002', '2.1', 'Stimulasi Berpikir Kritis & Reflektif', 'Guru memantik pertanyaan terbuka dan mendalam', 1, 4.00),
+    ('f2000000-0000-0000-0000-000000000202', 'f1000000-0000-0000-0000-000000000002', '2.2', 'Konstruksi Pengetahuan Kontekstual', 'Mengaitkan materi dengan kehidupan nyata santri', 2, 4.00),
+    ('f2000000-0000-0000-0000-000000000301', 'f1000000-0000-0000-0000-000000000003', '3.1', 'Interaksi Kasih Sayang & Keteladanan', 'Komunikasi santun, ramah anak, dan tanpa kekerasan', 1, 4.00),
+    ('f2000000-0000-0000-0000-000000000302', 'f1000000-0000-0000-0000-000000000003', '3.2', 'Penguatan Nilai Rahmatan lil Alamin', 'Menanamkan rasa syukur, persaudaraan, dan empati', 2, 4.00),
+    ('f2000000-0000-0000-0000-000000000401', 'f1000000-0000-0000-0000-000000000004', '4.1', 'Keterlibatan Aktif Seluruh Murid', 'Semua anak berpartisipasi setara tanpa diskriminasi', 1, 4.00),
+    ('f2000000-0000-0000-0000-000000000501', 'f1000000-0000-0000-0000-000000000005', '5.1', 'Pemberian Umpan Balik Positif Konstruktif', 'Guru mengapresiasi usaha dan memberikan arahan perbaikan', 1, 4.00)
+ON CONFLICT DO NOTHING;
+
+-- ==========================================
+-- BAGIAN 7: AKTIFKAN SUPABASE REALTIME REPLICATION
+-- ==========================================
+DO $$
+DECLARE
+    tbl text;
+    rt_tables text[] := ARRAY[
+        'system_settings', 'academic_years', 'semesters', 'classes', 'subjects',
+        'teachers', 'students', 'class_members', 'teaching_assignments', 'homeroom_assignments',
+        'schedules', 'teaching_journals', 'student_attendance', 'assessments', 'grades',
+        'final_grades', 'report_cards', 'document_links', 'supervision_records',
+        'student_guidance_records', 'notifications'
+    ];
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+        FOREACH tbl IN ARRAY rt_tables LOOP
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_publication_tables
+                WHERE pubname = 'supabase_realtime'
+                  AND schemaname = 'public'
+                  AND tablename = tbl
+            ) THEN
+                EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I;', tbl);
+            END IF;
+        END LOOP;
+    END IF;
+END $$;

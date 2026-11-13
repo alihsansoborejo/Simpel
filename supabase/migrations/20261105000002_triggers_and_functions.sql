@@ -35,6 +35,9 @@ END $$;
 -- 2. OTOMATISASI PROFIL DARI AUTH.USERS
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
+DECLARE
+    role_val text;
+    idx int := 0;
 BEGIN
     INSERT INTO public.profiles (id, email, full_name, avatar_url, is_active)
     VALUES (
@@ -51,6 +54,21 @@ BEGIN
     IF lower(NEW.email) = 'alihsansoborejo@gmail.com' THEN
         INSERT INTO public.user_roles (user_id, role, is_primary)
         VALUES (NEW.id, 'admin', TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    ELSIF jsonb_typeof(NEW.raw_user_meta_data->'roles') = 'array' THEN
+        FOR role_val IN SELECT jsonb_array_elements_text(NEW.raw_user_meta_data->'roles') LOOP
+            IF role_val IN ('guru', 'wali_kelas', 'kepala_madrasah') THEN
+                INSERT INTO public.user_roles (user_id, role, is_primary)
+                VALUES (NEW.id, role_val::user_role_type, idx = 0)
+                ON CONFLICT (user_id, role) DO NOTHING;
+                idx := idx + 1;
+            END IF;
+        END LOOP;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = NEW.id) THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (NEW.id, 'guru', TRUE)
         ON CONFLICT (user_id, role) DO NOTHING;
     END IF;
 

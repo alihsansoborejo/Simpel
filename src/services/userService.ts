@@ -1,4 +1,4 @@
-import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
+import { supabase, isSupabaseConfigured, createEphemeralSupabaseClient } from '../lib/supabaseClient';
 import { Profile, UserRole, ActivityLog, Teacher } from '../types/database.types';
 import { DEMO_USERS, DEMO_TEACHERS } from '../lib/demoData';
 import { academicService } from './academicService';
@@ -328,6 +328,28 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
 
   const updated = [newItem, ...currentUsers];
   saveDemoUsers(updated);
+
+  // Daftarkan otomatis ke Supabase Auth via client terpisah agar sesi Admin tidak tertimpa
+  if (isSupabaseConfigured) {
+    const ephemeralClient = createEphemeralSupabaseClient();
+    if (ephemeralClient) {
+      const safeRoles = data.roles.filter((r) => r !== 'admin');
+      void ephemeralClient.auth
+        .signUp({
+          email: normalizedEmail,
+          password,
+          options: {
+            data: {
+              full_name: data.full_name.trim(),
+              roles: safeRoles,
+            },
+          },
+        })
+        .catch((err) => {
+          console.warn('Auto-provision Supabase Auth skipped:', err);
+        });
+    }
+  }
 
   // Catat ke Log Aktivitas
   await activityLogService.log({

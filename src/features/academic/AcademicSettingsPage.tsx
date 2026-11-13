@@ -5,9 +5,10 @@ import { isSupabaseConfigured, supabase, getSupabaseConfigStatus } from '../../l
 import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School, Copy, Download, ExternalLink, CheckCircle2, AlertTriangle, RefreshCw, LogOut, KeyRound } from 'lucide-react';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import { useAuth } from '../../context/AuthContext';
+import { signInSupabaseStrict } from '../../services/authService';
 
 export const AcademicSettingsPage: React.FC = () => {
-  const { logout, login } = useAuth();
+  const { logout, refreshProfile } = useAuth();
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
   const [semesters, setSemesters] = useState<Semester[]>([]);
@@ -547,7 +548,8 @@ export const AcademicSettingsPage: React.FC = () => {
                         setSupaAuthLoading(true);
                         setSupaAuthError(null);
                         try {
-                          await login(supaAuthEmail, supaAuthPassword);
+                          await signInSupabaseStrict(supaAuthEmail, supaAuthPassword);
+                          await refreshProfile();
                           await checkSupabaseConnection();
                           setStatusMessage('Sesi Auth Supabase berhasil terhubung!');
                         } catch (err: any) {

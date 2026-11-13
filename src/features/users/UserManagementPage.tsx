@@ -103,7 +103,13 @@ export const UserManagementPage: React.FC = () => {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvRows, setCsvRows] = useState<CSVPreviewRow[]>([]);
-  const [importSummary, setImportSummary] = useState<{ total: number; success: number; failed: number } | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSummary, setImportSummary] = useState<{
+    total: number;
+    success: number;
+    failed: number;
+    errors: string[];
+  } | null>(null);
   const [isImporting, setIsImporting] = useState(false);
 
   // Salin Password Feedback
@@ -291,56 +297,94 @@ export const UserManagementPage: React.FC = () => {
     if (!file) return;
     setCsvFile(file);
     setImportSummary(null);
+    setImportError(null);
+    setCsvRows([]);
+
+    const splitDelimitedLine = (line: string, delimiter: string): string[] => {
+      const cells: string[] = [];
+      let inQuotes = false;
+      let currentCell = '';
+      for (let c = 0; c < line.length; c++) {
+        const char = line[c];
+        if (char === '"') {
+          if (inQuotes && line[c + 1] === '"') {
+            currentCell += '"';
+            c++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === delimiter && !inQuotes) {
+          cells.push(currentCell.trim());
+          currentCell = '';
+        } else {
+          currentCell += char;
+        }
+      }
+      cells.push(currentCell.trim());
+      return cells;
+    };
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const text = event.target?.result as string;
-      if (!text) return;
-
-      const lines = text.split(/\r\n|\n/).filter((l) => l.trim().length > 0);
-      if (lines.length <= 1) {
-        alert('File CSV kosong atau tidak memiliki baris data.');
+      const rawText = (event.target?.result as string) || '';
+      const text = rawText.replace(/^\uFEFF/, '');
+      if (!text.trim()) {
+        setImportError('File CSV kosong. Silakan isi data guru/akun terlebih dahulu menggunakan Template CSV.');
         return;
       }
 
-      // Parse headers
-      const rawHeaders = lines[0].split(',').map((h) => h.replace(/^["']|["']$/g, '').trim().toLowerCase());
+      const lines = text.split(/\r\n|\n|\r/).filter((l) => l.trim().length > 0);
+      if (lines.length <= 1) {
+        setImportError('File CSV hanya berisi baris header (judul kolom) dan belum memiliki baris data akun.');
+        return;
+      }
+
+      // Auto-deteksi pemisah kolom (, dari Google Sheets / ; dari Excel Indonesia / Tab)
+      const headerLine = lines[0];
+      const commaCount = splitDelimitedLine(headerLine, ',').length;
+      const semiCount = splitDelimitedLine(headerLine, ';').length;
+      const tabCount = splitDelimitedLine(headerLine, '\t').length;
+      const delimiter =
+        semiCount > commaCount && semiCount >= tabCount
+          ? ';'
+          : tabCount > commaCount && tabCount > semiCount
+            ? '\t'
+            : ',';
+
+      const rawHeaders = splitDelimitedLine(headerLine, delimiter).map((h) =>
+        h.replace(/^["'\uFEFF]+|["']+$/g, '').trim().toLowerCase().replace(/\s+/g, '_')
+      );
 
       const emailIdx = rawHeaders.findIndex((h) => h.includes('email') || h.includes('username'));
       const passIdx = rawHeaders.findIndex((h) => h.includes('sandi') || h.includes('password'));
       const prefixIdx = rawHeaders.findIndex((h) => h.includes('gelar_depan') || h.includes('depan'));
-      const nameIdx = rawHeaders.findIndex((h) => h.includes('nama'));
+      const nameIdx = rawHeaders.findIndex(
+        (h) => h === 'nama' || h.includes('nama_lengkap') || h.includes('full_name') || h.includes('nama')
+      );
       const suffixIdx = rawHeaders.findIndex((h) => h.includes('gelar_belakang') || h.includes('belakang'));
       const nipIdx = rawHeaders.findIndex((h) => h === 'nip');
       const nuptkIdx = rawHeaders.findIndex((h) => h === 'nuptk');
-      const jkIdx = rawHeaders.findIndex((h) => h.includes('jk') || h.includes('kelamin') || h.includes('gender'));
+      const jkIdx = rawHeaders.findIndex((h) => h === 'jk' || h.includes('kelamin') || h.includes('gender'));
       const phoneIdx = rawHeaders.findIndex((h) => h.includes('telepon') || h.includes('hp') || h.includes('wa'));
       const specIdx = rawHeaders.findIndex((h) => h.includes('spesialisasi') || h.includes('tugas') || h.includes('mapel'));
       const roleIdx = rawHeaders.findIndex((h) => h.includes('role') || h.includes('peran'));
 
+      if (emailIdx === -1 || nameIdx === -1) {
+        const missingCols: string[] = [];
+        if (emailIdx === -1) missingCols.push('Email_Username (atau kolom Email)');
+        if (nameIdx === -1) missingCols.push('Nama_Lengkap (atau kolom Nama)');
+        setImportError(
+          `Format header CSV tidak sesuai. Kolom wajib tidak ditemukan: ${missingCols.join(', ')}. Header terbaca: [${rawHeaders.join(', ')}]. Gunakan "Unduh Template CSV" sebagai acuan.`
+        );
+        return;
+      }
+
+      const existingEmailSet = new Set(users.map((u) => u.email.trim().toLowerCase()));
+      const seenCsvEmails = new Map<string, number>();
       const parsedList: CSVPreviewRow[] = [];
 
       for (let i = 1; i < lines.length; i++) {
-        // Simple regex to split commas while respecting double quotes
-        const rawRow = lines[i];
-        const matches = rawRow.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g);
-        const cells: string[] = [];
-
-        // Fallback robust split
-        let inQuotes = false;
-        let currentCell = '';
-        for (let c = 0; c < rawRow.length; c++) {
-          const char = rawRow[c];
-          if (char === '"' || char === "'") {
-            inQuotes = !inQuotes;
-          } else if (char === ',' && !inQuotes) {
-            cells.push(currentCell.trim());
-            currentCell = '';
-          } else {
-            currentCell += char;
-          }
-        }
-        cells.push(currentCell.trim());
+        const cells = splitDelimitedLine(lines[i], delimiter);
 
         const cleanCell = (idx: number) => {
           if (idx < 0 || idx >= cells.length) return '';
@@ -348,6 +392,7 @@ export const UserManagementPage: React.FC = () => {
         };
 
         const email = cleanCell(emailIdx);
+        const normalizedEmail = email.toLowerCase();
         const password = cleanCell(passIdx) || 'AlIhsan2026!';
         const title_prefix = cleanCell(prefixIdx);
         const full_name = cleanCell(nameIdx);
@@ -362,10 +407,18 @@ export const UserManagementPage: React.FC = () => {
 
         // Parse roles
         const roles: UserRole[] = [];
-        const roleTokens = rawRoles.toLowerCase().split(/[,;]/).map((r) => r.trim());
+        const roleTokens = rawRoles
+          .toLowerCase()
+          .split(/[,;|/]/)
+          .map((r) => r.trim())
+          .filter(Boolean);
         if (roleTokens.includes('admin') || roleTokens.includes('administrator')) roles.push('admin');
-        if (roleTokens.includes('kepala_madrasah') || roleTokens.includes('kamad') || roleTokens.includes('kepala')) roles.push('kepala_madrasah');
-        if (roleTokens.includes('wali_kelas') || roleTokens.includes('walikelas')) roles.push('wali_kelas');
+        if (roleTokens.includes('kepala_madrasah') || roleTokens.includes('kamad') || roleTokens.includes('kepala')) {
+          roles.push('kepala_madrasah');
+        }
+        if (roleTokens.includes('wali_kelas') || roleTokens.includes('walikelas') || roleTokens.includes('wali')) {
+          roles.push('wali_kelas');
+        }
         if (roleTokens.includes('guru') || roles.length === 0) roles.push('guru');
 
         const messages: string[] = [];
@@ -373,21 +426,37 @@ export const UserManagementPage: React.FC = () => {
 
         if (!email) {
           status = 'error';
-          messages.push('Email kosong.');
-        } else if (!email.includes('@')) {
+          messages.push('Kolom Email_Username kosong.');
+        } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
           status = 'error';
-          messages.push('Format email tidak valid.');
+          messages.push(`Format email "${email}" tidak valid (contoh: nama@alihsan.sch.id).`);
+        } else if (existingEmailSet.has(normalizedEmail)) {
+          status = 'error';
+          messages.push(`Email "${email}" sudah terdaftar di sistem.`);
+        } else if (seenCsvEmails.has(normalizedEmail)) {
+          status = 'error';
+          messages.push(`Email "${email}" ganda dengan baris ke-${seenCsvEmails.get(normalizedEmail)} di file CSV.`);
+        } else {
+          seenCsvEmails.set(normalizedEmail, i);
         }
 
         if (!full_name) {
           status = 'error';
-          messages.push('Nama lengkap kosong.');
+          messages.push('Kolom Nama_Lengkap kosong.');
         }
 
-        if (status !== 'error') {
-          if (roles.includes('guru') || roles.includes('wali_kelas')) {
-            messages.push('Otomatis masuk ke data Guru.');
-          }
+        if (password && password.length < 6) {
+          status = 'error';
+          messages.push('Kata sandi minimal 6 karakter.');
+        }
+
+        if (rawJk && !['L', 'P', 'LAKI-LAKI', 'PEREMPUAN'].includes(rawJk)) {
+          if (status === 'valid') status = 'warning';
+          messages.push(`Jenis kelamin "${rawJk}" tidak standar, otomatis diset L.`);
+        }
+
+        if (status !== 'error' && (roles.includes('guru') || roles.includes('wali_kelas'))) {
+          messages.push('Siap masuk Akun & Data Guru.');
         }
 
         parsedList.push({
@@ -409,6 +478,9 @@ export const UserManagementPage: React.FC = () => {
 
       setCsvRows(parsedList);
     };
+    reader.onerror = () => {
+      setImportError('Gagal membaca berkas CSV. Pastikan file tidak sedang terkunci oleh Excel dan berformat .csv.');
+    };
     reader.readAsText(file);
   };
 
@@ -417,8 +489,21 @@ export const UserManagementPage: React.FC = () => {
     if (csvRows.length === 0) return;
     setIsImporting(true);
     setImportSummary(null);
+    setImportError(null);
 
-    const validRows = csvRows.filter((r) => r.status !== 'error');
+    const invalidPreviewErrors: string[] = [];
+    const validRows: CSVPreviewRow[] = [];
+
+    csvRows.forEach((r, idx) => {
+      if (r.status === 'error') {
+        invalidPreviewErrors.push(
+          `Baris ${idx + 1} (${r.email || r.full_name || 'Tanpa Identitas'}): ${r.messages.join(' ')}`
+        );
+      } else {
+        validRows.push(r);
+      }
+    });
+
     const payloadRows: CreateUserData[] = validRows.map((r) => ({
       email: r.email,
       password: r.password,
@@ -436,10 +521,13 @@ export const UserManagementPage: React.FC = () => {
 
     try {
       const result = await bulkCreateUsersFromCSV(payloadRows, currentUser?.id || 'admin');
+      const allErrors = [...invalidPreviewErrors, ...result.errors];
+
       setImportSummary({
         total: csvRows.length,
         success: result.success,
-        failed: result.failed + (csvRows.length - validRows.length),
+        failed: result.failed + invalidPreviewErrors.length,
+        errors: allErrors,
       });
 
       if (result.success > 0) {
@@ -448,9 +536,11 @@ export const UserManagementPage: React.FC = () => {
           message: `Berhasil mengimpor ${result.success} akun pengguna & data guru secara otomatis!`,
         });
         await loadData();
+      } else if (allErrors.length > 0) {
+        setImportError('Impor tidak dapat memproses akun. Periksa detail kesalahan tiap baris di bawah.');
       }
     } catch (err: any) {
-      alert(`Gagal memproses impor: ${err.message}`);
+      setImportError(`Gagal memproses impor: ${err.message}`);
     } finally {
       setIsImporting(false);
     }
@@ -638,6 +728,7 @@ export const UserManagementPage: React.FC = () => {
             onClick={() => {
               setCsvFile(null);
               setCsvRows([]);
+              setImportError(null);
               setImportSummary(null);
               setIsImportModalOpen(true);
             }}
@@ -1353,24 +1444,57 @@ export const UserManagementPage: React.FC = () => {
 
           {/* Upload Input */}
           <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Pilih Berkas CSV</label>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Pilih Berkas CSV (Mendukung pemisah koma <code>,</code> maupun titik koma <code>;</code> dari Excel)
+            </label>
             <input
               type="file"
-              accept=".csv"
+              accept=".csv,text/csv"
               onChange={handleCSVUpload}
               className="w-full text-xs text-slate-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-800 file:text-white hover:file:bg-emerald-900 cursor-pointer border border-slate-300 rounded-lg p-1 bg-white"
             />
           </div>
 
+          {importError && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span className="leading-relaxed">{importError}</span>
+            </div>
+          )}
+
           {/* Pratinjau Baris */}
           {csvRows.length > 0 && (
             <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="font-bold text-slate-800">Pratinjau Data ({csvRows.length} Baris):</span>
-                <span className="text-[11px] text-emerald-700">
-                  {csvRows.filter((r) => r.status === 'valid').length} baris valid
-                </span>
+                <div className="flex items-center gap-3 text-[11px] font-semibold">
+                  <span className="text-emerald-700">
+                    {csvRows.filter((r) => r.status !== 'error').length} baris siap impor
+                  </span>
+                  {csvRows.some((r) => r.status === 'error') && (
+                    <span className="text-rose-700">
+                      {csvRows.filter((r) => r.status === 'error').length} baris perlu diperbaiki
+                    </span>
+                  )}
+                </div>
               </div>
+
+              {csvRows.some((r) => r.status === 'error') && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-[11px] text-rose-800 space-y-1">
+                  <p className="font-bold">Daftar Baris yang Harus Diperbaiki Sebelum Impor:</p>
+                  <ul className="list-disc pl-4 space-y-0.5 max-h-28 overflow-y-auto">
+                    {csvRows.map((row, idx) =>
+                      row.status === 'error' ? (
+                        <li key={idx}>
+                          <span className="font-semibold">Baris {idx + 1}</span>
+                          {row.email ? ` (${row.email})` : row.full_name ? ` (${row.full_name})` : ''}:{' '}
+                          {row.messages.join(' ')}
+                        </li>
+                      ) : null
+                    )}
+                  </ul>
+                </div>
+              )}
 
               <div className="max-h-60 overflow-y-auto border border-slate-200 rounded-xl overflow-hidden">
                 <table className="w-full text-left border-collapse text-[11px]">
@@ -1378,37 +1502,37 @@ export const UserManagementPage: React.FC = () => {
                     <tr>
                       <th className="p-2">No</th>
                       <th className="p-2">Email</th>
-                      <th className="p-2">Kata Sandi</th>
                       <th className="p-2">Nama & Gelar</th>
-                      <th className="p-2">NIP / JK</th>
                       <th className="p-2">Peran</th>
-                      <th className="p-2">Status</th>
+                      <th className="p-2">Status & Keterangan</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {csvRows.map((row, idx) => (
-                      <tr key={idx} className={row.status === 'error' ? 'bg-rose-50/50' : 'hover:bg-slate-50'}>
-                        <td className="p-2 font-mono">{idx + 1}</td>
-                        <td className="p-2 font-mono truncate max-w-[140px]">{row.email}</td>
-                        <td className="p-2 font-mono text-slate-500">{row.password}</td>
-                        <td className="p-2 font-semibold">
+                      <tr key={idx} className={row.status === 'error' ? 'bg-rose-50/70' : 'hover:bg-slate-50'}>
+                        <td className="p-2 font-mono align-top">{idx + 1}</td>
+                        <td className="p-2 font-mono truncate max-w-[140px] align-top">{row.email || '-'}</td>
+                        <td className="p-2 font-semibold align-top">
                           {row.title_prefix ? `${row.title_prefix} ` : ''}
-                          {row.full_name}
+                          {row.full_name || '-'}
                           {row.title_suffix ? `, ${row.title_suffix}` : ''}
                         </td>
-                        <td className="p-2 font-mono">{row.nip || '-'} ({row.gender})</td>
-                        <td className="p-2">
+                        <td className="p-2 align-top">
                           <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 font-semibold text-[10px] border border-emerald-200">
                             {row.roles.join(', ')}
                           </span>
                         </td>
-                        <td className="p-2">
-                          {row.status === 'valid' ? (
-                            <span className="text-emerald-700 font-bold">Siap</span>
+                        <td className="p-2 align-top">
+                          {row.status === 'error' ? (
+                            <div className="text-rose-700 font-medium leading-snug">
+                              <span className="font-bold">Perlu Diperbaiki:</span> {row.messages.join(' ')}
+                            </div>
+                          ) : row.status === 'warning' ? (
+                            <div className="text-amber-700 font-medium leading-snug">
+                              {row.messages.join(' ')}
+                            </div>
                           ) : (
-                            <span className="text-rose-600 font-bold" title={row.messages.join(' ')}>
-                              Error
-                            </span>
+                            <span className="text-emerald-700 font-bold">Siap</span>
                           )}
                         </td>
                       </tr>
@@ -1421,14 +1545,32 @@ export const UserManagementPage: React.FC = () => {
 
           {/* Import Summary */}
           {importSummary && (
-            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800">
+            <div
+              className={`p-3 border rounded-xl text-xs space-y-2 ${
+                importSummary.failed > 0 && importSummary.success === 0
+                  ? 'bg-rose-50 border-rose-200 text-rose-900'
+                  : importSummary.failed > 0
+                    ? 'bg-amber-50 border-amber-200 text-amber-900'
+                    : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              }`}
+            >
               <p className="font-bold">Laporan Hasil Impor:</p>
-              <p className="mt-1">
-                Berhasil: <span className="font-bold text-emerald-900">{importSummary.success}</span> dari {importSummary.total} akun.
+              <p>
+                Berhasil: <span className="font-bold">{importSummary.success}</span> dari {importSummary.total} akun.
                 {importSummary.failed > 0 && (
-                  <span className="text-rose-700 ml-2">Gagal: {importSummary.failed} baris.</span>
+                  <span className="text-rose-700 font-bold ml-2">Gagal: {importSummary.failed} baris.</span>
                 )}
               </p>
+              {importSummary.errors.length > 0 && (
+                <div className="pt-1 border-t border-black/10 space-y-1">
+                  <p className="font-semibold text-[11px]">Keterangan baris yang harus diperbaiki:</p>
+                  <ul className="list-disc pl-4 space-y-0.5 text-[11px] max-h-32 overflow-y-auto">
+                    {importSummary.errors.map((errMsg, idx) => (
+                      <li key={idx}>{errMsg}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
 
