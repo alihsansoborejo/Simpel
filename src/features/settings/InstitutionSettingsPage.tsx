@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAppSettings } from '../../context/AppSettingsContext';
 import { syncService } from '../../services/syncService';
+import { academicService } from '../../services/academicService';
 import {
   School,
   Save,
@@ -150,8 +151,15 @@ export const InstitutionSettingsPage: React.FC = () => {
 
       await syncService.flushMutations();
 
-      setStatusMessage('Profil Identitas & Logo Madrasah berhasil disimpan dan disinkronkan ke semua perangkat!');
-      setTimeout(() => setStatusMessage(null), 4000);
+      const cloudErr = academicService.getLastCloudSyncError();
+      if (cloudErr) {
+        setErrorMessage(
+          `Tersimpan di server aplikasi, namun gagal menulis ke Supabase (${cloudErr}). Pastikan akun login terdaftar di Supabase Auth dengan role admin.`
+        );
+      } else {
+        setStatusMessage('Profil Identitas & Logo Madrasah berhasil disimpan dan disinkronkan ke semua perangkat!');
+        setTimeout(() => setStatusMessage(null), 4000);
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Gagal menyimpan konfigurasi identitas.');
     } finally {

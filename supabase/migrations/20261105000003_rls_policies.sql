@@ -84,7 +84,7 @@ BEGIN
         EXECUTE format('
             DROP POLICY IF EXISTS %I_read_auth ON public.%I;
             CREATE POLICY %I_read_auth ON public.%I FOR SELECT TO authenticated USING (TRUE);
-        ', tbl, tbl);
+        ', tbl, tbl, tbl, tbl);
     END LOOP;
 END $$;
 
@@ -317,8 +317,8 @@ CREATE POLICY "guidance_update_own" ON public.student_guidance_records
 DROP POLICY IF EXISTS "notifications_own" ON public.notifications;
 CREATE POLICY "notifications_own" ON public.notifications
     FOR ALL TO authenticated
-    USING (recipient_id = auth.uid())
-    WITH CHECK (recipient_id = auth.uid());
+    USING (recipient_id = auth.uid() OR recipient_id IS NULL)
+    WITH CHECK (recipient_id = auth.uid() OR recipient_id IS NULL);
 
 DROP POLICY IF EXISTS "ai_generations_own" ON public.ai_generations;
 CREATE POLICY "ai_generations_own" ON public.ai_generations

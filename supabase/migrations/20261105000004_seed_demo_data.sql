@@ -15,7 +15,8 @@ INSERT INTO public.system_settings (
     principal_nip,
     kktp_default,
     is_report_card_locked
-) VALUES (
+)
+SELECT
     'MI Ma’arif Al Ihsan Soborejo',
     '111233080000',
     '60700000',
@@ -24,7 +25,7 @@ INSERT INTO public.system_settings (
     '197508122005011003',
     75.00,
     FALSE
-) ON CONFLICT DO NOTHING;
+WHERE NOT EXISTS (SELECT 1 FROM public.system_settings);
 
 -- 2. TAHUN PELAJARAN (2026/2027 AKTIF)
 INSERT INTO public.academic_years (id, name, start_date, end_date, is_active)

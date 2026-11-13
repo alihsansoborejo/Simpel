@@ -123,6 +123,25 @@ export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok
     matchedUser = dynamicUsers[0];
   }
 
+  if (isSupabaseConfigured && matchedUser?.email) {
+    try {
+      const candidatePassword =
+        ('password' in matchedUser && (matchedUser as any).password) || 'AlIhsan2026!';
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email: matchedUser.email.toLowerCase(),
+        password: candidatePassword,
+      });
+      if (!authError && authData?.user) {
+        return await fetchFullUserAccount(authData.user.id, matchedUser.email.toLowerCase());
+      }
+      if (authError) {
+        console.warn('Supabase Auth sign-in skipped on quick login:', authError.message);
+      }
+    } catch (supaErr) {
+      console.warn('Supabase Auth quick login fallback:', supaErr);
+    }
+  }
+
   let homeroomClassId: string | null = null;
   const teacherId = matchedUser?.teacher_info?.id;
   if (teacherId) {

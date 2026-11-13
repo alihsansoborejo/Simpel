@@ -12,7 +12,7 @@ async function mountApp() {
   try {
     await Promise.race([
       syncService.bootstrap(),
-      new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+      new Promise<void>((resolve) => setTimeout(resolve, 3000)),
     ]);
   } catch (err) {
     console.warn('[Sync] Initial bootstrap deferred:', err);

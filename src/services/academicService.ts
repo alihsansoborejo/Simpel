@@ -54,12 +54,23 @@ function setLocal<T>(key: string, value: T): void {
   }
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(value?: string | null): boolean {
+  return typeof value === 'string' && UUID_REGEX.test(value);
+}
+
+let lastCloudSyncError: string | null = null;
+
 export const academicService = {
+  getLastCloudSyncError(): string | null {
+    return lastCloudSyncError;
+  },
+
   // === SISTEM PENGATURAN ===
   async getSettings(): Promise<SystemSettings> {
     if (isSupabaseConfigured) {
       try {
-        const { data, error } = await supabase.from('system_settings').select('*').limit(1).single();
+        const { data, error } = await supabase.from('system_settings').select('*').limit(1).maybeSingle();
         if (!error && data) return data as SystemSettings;
       } catch (err) {
         console.warn('Supabase getSettings fallback:', err);
@@ -71,14 +82,60 @@ export const academicService = {
   async updateSettings(settings: Partial<SystemSettings>): Promise<SystemSettings> {
     const current = await this.getSettings();
     const updated: SystemSettings = { ...current, ...settings, updated_at: new Date().toISOString() };
+    setLocal(STORAGE_KEYS.SETTINGS, updated);
+    lastCloudSyncError = null;
+
     if (isSupabaseConfigured) {
       try {
-        await supabase.from('system_settings').update(settings).eq('id', current.id);
-      } catch (err) {
+        const dbPayload: Record<string, unknown> = {
+          updated_at: updated.updated_at,
+        };
+        if (updated.school_name !== undefined) dbPayload.school_name = updated.school_name;
+        if (updated.nsm !== undefined) dbPayload.nsm = updated.nsm;
+        if (updated.npsn !== undefined) dbPayload.npsn = updated.npsn;
+        if (updated.address !== undefined) dbPayload.address = updated.address;
+        if (updated.principal_name !== undefined) dbPayload.principal_name = updated.principal_name;
+        if (updated.principal_nip !== undefined) dbPayload.principal_nip = updated.principal_nip;
+        if (updated.logo_url !== undefined) dbPayload.logo_url = updated.logo_url;
+        if (updated.favicon_url !== undefined) dbPayload.favicon_url = updated.favicon_url;
+        if (updated.kktp_default !== undefined) dbPayload.kktp_default = Number(updated.kktp_default);
+        if (updated.is_report_card_locked !== undefined) dbPayload.is_report_card_locked = Boolean(updated.is_report_card_locked);
+        if (isUuid(updated.active_academic_year_id)) dbPayload.active_academic_year_id = updated.active_academic_year_id;
+        if (isUuid(updated.active_semester_id)) dbPayload.active_semester_id = updated.active_semester_id;
+
+        const { data: existingRow, error: fetchErr } = await supabase
+          .from('system_settings')
+          .select('id')
+          .limit(1)
+          .maybeSingle();
+
+        if (fetchErr) {
+          lastCloudSyncError = `${fetchErr.message} (${fetchErr.code || 'RLS/Auth'})`;
+          console.warn('Supabase fetch system_settings error:', fetchErr);
+        } else if (existingRow?.id && isUuid(existingRow.id)) {
+          const { error: updateErr } = await supabase
+            .from('system_settings')
+            .update(dbPayload)
+            .eq('id', existingRow.id);
+          if (updateErr) {
+            lastCloudSyncError = `${updateErr.message} (${updateErr.code || 'UpdateError'})`;
+            console.warn('Supabase updateSettings error:', updateErr);
+          }
+        } else {
+          const newId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : undefined;
+          const { error: insertErr } = await supabase
+            .from('system_settings')
+            .insert(newId ? { id: newId, ...dbPayload } : dbPayload);
+          if (insertErr) {
+            lastCloudSyncError = `${insertErr.message} (${insertErr.code || 'InsertError'})`;
+            console.warn('Supabase insert system_settings error:', insertErr);
+          }
+        }
+      } catch (err: any) {
+        lastCloudSyncError = err?.message || 'Gagal menghubungi Supabase.';
         console.warn('Supabase updateSettings fallback:', err);
       }
     }
-    setLocal(STORAGE_KEYS.SETTINGS, updated);
     return updated;
   },
 

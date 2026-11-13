@@ -64,12 +64,17 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
     address TEXT DEFAULT 'Soborejo, Kec. Pringsurat, Kab. Temanggung, Jawa Tengah',
     principal_name TEXT DEFAULT 'Kepala Madrasah, S.Pd.I',
     principal_nip TEXT DEFAULT '-',
+    logo_url TEXT,
+    favicon_url TEXT,
     active_academic_year_id UUID,
     active_semester_id UUID,
     kktp_default NUMERIC(5,2) NOT NULL DEFAULT 75.00,
     is_report_card_locked BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
+
+ALTER TABLE public.system_settings ADD COLUMN IF NOT EXISTS logo_url TEXT;
+ALTER TABLE public.system_settings ADD COLUMN IF NOT EXISTS favicon_url TEXT;
 
 CREATE TABLE IF NOT EXISTS public.academic_years (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -511,13 +516,19 @@ CREATE TABLE IF NOT EXISTS public.student_guidance_records (
 -- 12. NOTIFIKASI, ASISTEN AI GEMINI, & LOG AKTIVITAS
 CREATE TABLE IF NOT EXISTS public.notifications (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    recipient_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    recipient_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+    target_role TEXT DEFAULT 'semua',
+    category TEXT DEFAULT 'akademik',
     title TEXT NOT NULL,
     message TEXT NOT NULL,
     action_url TEXT,
     is_read BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('Asia/Jakarta', now())
 );
+
+ALTER TABLE public.notifications ALTER COLUMN recipient_id DROP NOT NULL;
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS target_role TEXT DEFAULT 'semua';
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'akademik';
 
 CREATE TABLE IF NOT EXISTS public.ai_generations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

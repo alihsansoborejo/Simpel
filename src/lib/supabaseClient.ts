@@ -1,8 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 
+declare const __SUPABASE_URL__: string | undefined;
+declare const __SUPABASE_ANON_KEY__: string | undefined;
+
 const supabaseUrl =
   import.meta.env.VITE_SUPABASE_URL ||
   import.meta.env.SUPABASE_URL ||
+  (typeof __SUPABASE_URL__ !== 'undefined' ? __SUPABASE_URL__ : '') ||
   '';
 
 const supabaseAnonKey =
@@ -10,6 +14,7 @@ const supabaseAnonKey =
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
   import.meta.env.SUPABASE_PUBLISHABLE_KEY ||
   import.meta.env.SUPABASE_ANON_KEY ||
+  (typeof __SUPABASE_ANON_KEY__ !== 'undefined' ? __SUPABASE_ANON_KEY__ : '') ||
   '';
 
 export const isSupabaseConfigured = Boolean(
@@ -32,5 +37,7 @@ export const supabase = isSupabaseConfigured
 
 export const getSupabaseConfigStatus = () => ({
   isConfigured: isSupabaseConfigured,
+  hasUrl: Boolean(supabaseUrl && supabaseUrl.startsWith('https://') && !supabaseUrl.includes('your-project-id')),
+  hasKey: Boolean(supabaseAnonKey && !supabaseAnonKey.includes('mock-anon-key')),
   url: supabaseUrl ? supabaseUrl.replace(/https:\/\/(.*)\.supabase\.co.*/, 'https://***.supabase.co') : 'Belum diatur',
 });

@@ -22,12 +22,16 @@ export const AcademicSettingsPage: React.FC = () => {
   const [dbCheckState, setDbCheckState] = useState<{
     checking: boolean;
     reachable: boolean;
+    hasAuthSession: boolean;
+    authEmail: string | null;
     tablesReady: number;
     totalChecked: number;
     errorMessage: string | null;
   }>({
     checking: false,
     reachable: false,
+    hasAuthSession: false,
+    authEmail: null,
     tablesReady: 0,
     totalChecked: 8,
     errorMessage: null,
@@ -40,9 +44,11 @@ export const AcademicSettingsPage: React.FC = () => {
       setDbCheckState({
         checking: false,
         reachable: false,
+        hasAuthSession: false,
+        authEmail: null,
         tablesReady: 0,
         totalChecked: 8,
-        errorMessage: 'Variabel lingkungan VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY belum diatur.',
+        errorMessage: 'Variabel lingkungan VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY belum diatur pada Secrets.',
       });
       return;
     }
@@ -60,14 +66,18 @@ export const AcademicSettingsPage: React.FC = () => {
     ];
 
     try {
-      const results = await Promise.all(
-        tablesToCheck.map((tbl) => supabase.from(tbl).select('id', { count: 'exact', head: true }))
-      );
+      const [{ data: sessionData }, ...results] = await Promise.all([
+        supabase.auth.getSession(),
+        ...tablesToCheck.map((tbl) => supabase.from(tbl).select('id', { count: 'exact', head: true })),
+      ]);
+      const sessionUser = sessionData?.session?.user || null;
       const readyCount = results.filter((r) => !r.error || r.error.code !== '42P01').length;
       const firstErr = results.find((r) => r.error)?.error;
       setDbCheckState({
         checking: false,
         reachable: true,
+        hasAuthSession: Boolean(sessionUser),
+        authEmail: sessionUser?.email || null,
         tablesReady: readyCount,
         totalChecked: tablesToCheck.length,
         errorMessage: firstErr ? `${firstErr.message} (${firstErr.code || 'Error'})` : null,
@@ -76,6 +86,8 @@ export const AcademicSettingsPage: React.FC = () => {
       setDbCheckState({
         checking: false,
         reachable: false,
+        hasAuthSession: false,
+        authEmail: null,
         tablesReady: 0,
         totalChecked: tablesToCheck.length,
         errorMessage: err?.message || 'Gagal menghubungi endpoint Supabase.',
@@ -474,13 +486,30 @@ export const AcademicSettingsPage: React.FC = () => {
                 <span className="font-mono text-[11px] text-slate-200 block truncate">
                   {isSupabaseConfigured ? supabaseStatus.url : 'VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY belum disetel'}
                 </span>
+                {isSupabaseConfigured && (
+                  <div className="pt-1 flex items-center justify-between text-[10px]">
+                    <span className="text-slate-300">Sesi Auth Supabase:</span>
+                    <span className={dbCheckState.hasAuthSession ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'}>
+                      {dbCheckState.hasAuthSession
+                        ? `Aktif (${dbCheckState.authEmail || 'Authenticated'})`
+                        : 'Belum Login JWT (Anonim / RLS Terbatas)'}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {!isSupabaseConfigured ? (
                 <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-400/30 text-[11px] text-amber-200 leading-relaxed flex items-start gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                   <span>
-                    Aplikasi saat ini menggunakan <strong>Sinkronisasi Server Real-Time</strong>. Untuk menghubungkan langsung ke Supabase, tambahkan <code className="text-white">VITE_SUPABASE_URL</code> dan <code className="text-white">VITE_SUPABASE_ANON_KEY</code> pada pengaturan <strong>Secrets / Environment Variables</strong>.
+                    Aplikasi saat ini menggunakan <strong>Sinkronisasi Server Real-Time</strong>. Untuk menghubungkan langsung ke Supabase, tambahkan <code className="text-white">VITE_SUPABASE_URL</code> dan <code className="text-white">VITE_SUPABASE_ANON_KEY</code> pada pengaturan <strong>Secrets / Environment Variables</strong> AI Studio lalu restart server.
+                  </span>
+                </div>
+              ) : !dbCheckState.hasAuthSession ? (
+                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-400/30 text-[11px] text-amber-200 leading-relaxed flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <span>
+                    Env Supabase aktif, namun sesi saat ini belum memiliki token Auth Supabase. Pastikan user <code className="text-white">alihsansoborejo@gmail.com</code> sudah dibuat di <strong>Supabase Auth → Users</strong> lalu keluar (Logout) dan login ulang.
                   </span>
                 </div>
               ) : dbCheckState.errorMessage ? (
@@ -490,7 +519,7 @@ export const AcademicSettingsPage: React.FC = () => {
               ) : null}
 
               <p className="text-[11px] text-slate-300 leading-relaxed">
-                Skrip migrasi database lengkap (42 tabel termasuk kolom logo/identitas madrasah, RLS, trigger, fungsi, dan seed data) telah siap dijalankan pada Supabase SQL Editor.
+                Skrip migrasi database lengkap (42 tabel termasuk kolom logo/identitas madrasah, role admin otomatis, RLS, Realtime publication, trigger, dan seed data) telah siap dijalankan pada Supabase SQL Editor.
               </p>
             </div>
 

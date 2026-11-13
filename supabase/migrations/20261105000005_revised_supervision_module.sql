@@ -196,25 +196,31 @@ ALTER TABLE public.supervision_followups ENABLE ROW LEVEL SECURITY;
 -- Instruments, Aspects, Indicators:
 -- Semua user terautentikasi dapat melihat instrumen
 -- Hanya Admin & Kepala Madrasah yang dapat mengonfigurasi
+DROP POLICY IF EXISTS "supervision_instruments_read" ON public.supervision_instruments;
 CREATE POLICY "supervision_instruments_read" ON public.supervision_instruments
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_instruments_manage" ON public.supervision_instruments;
 CREATE POLICY "supervision_instruments_manage" ON public.supervision_instruments
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
     WITH CHECK (public.is_admin() OR public.has_role('kepala_madrasah'));
 
+DROP POLICY IF EXISTS "supervision_aspects_read" ON public.supervision_aspects;
 CREATE POLICY "supervision_aspects_read" ON public.supervision_aspects
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_aspects_manage" ON public.supervision_aspects;
 CREATE POLICY "supervision_aspects_manage" ON public.supervision_aspects
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
     WITH CHECK (public.is_admin() OR public.has_role('kepala_madrasah'));
 
+DROP POLICY IF EXISTS "supervision_indicators_read" ON public.supervision_indicators;
 CREATE POLICY "supervision_indicators_read" ON public.supervision_indicators
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_indicators_manage" ON public.supervision_indicators;
 CREATE POLICY "supervision_indicators_manage" ON public.supervision_indicators
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
@@ -222,6 +228,7 @@ CREATE POLICY "supervision_indicators_manage" ON public.supervision_indicators
 
 -- Supervision Records:
 -- SELECT: Kepala Madrasah, Admin, atau Guru yang bersangkutan (jika di-share)
+DROP POLICY IF EXISTS "supervision_records_select" ON public.supervision_records;
 CREATE POLICY "supervision_records_select" ON public.supervision_records
     FOR SELECT TO authenticated
     USING (
@@ -230,11 +237,13 @@ CREATE POLICY "supervision_records_select" ON public.supervision_records
     );
 
 -- INSERT: HANYA Kepala Madrasah & Admin
+DROP POLICY IF EXISTS "supervision_records_insert" ON public.supervision_records;
 CREATE POLICY "supervision_records_insert" ON public.supervision_records
     FOR INSERT TO authenticated
     WITH CHECK (public.is_principal());
 
 -- UPDATE: Kepala Madrasah & Admin (atau Guru hanya untuk memberikan tanggapan balik / konfirmasi)
+DROP POLICY IF EXISTS "supervision_records_update" ON public.supervision_records;
 CREATE POLICY "supervision_records_update" ON public.supervision_records
     FOR UPDATE TO authenticated
     USING (
@@ -247,11 +256,13 @@ CREATE POLICY "supervision_records_update" ON public.supervision_records
     );
 
 -- DELETE: HANYA Admin
+DROP POLICY IF EXISTS "supervision_records_delete" ON public.supervision_records;
 CREATE POLICY "supervision_records_delete" ON public.supervision_records
     FOR DELETE TO authenticated
     USING (public.is_admin());
 
 -- Supervision Results:
+DROP POLICY IF EXISTS "supervision_results_select" ON public.supervision_results;
 CREATE POLICY "supervision_results_select" ON public.supervision_results
     FOR SELECT TO authenticated
     USING (
@@ -264,12 +275,14 @@ CREATE POLICY "supervision_results_select" ON public.supervision_results
         )
     );
 
+DROP POLICY IF EXISTS "supervision_results_manage" ON public.supervision_results;
 CREATE POLICY "supervision_results_manage" ON public.supervision_results
     FOR ALL TO authenticated
     USING (public.is_principal())
     WITH CHECK (public.is_principal());
 
 -- Supervision Followups:
+DROP POLICY IF EXISTS "supervision_followups_select" ON public.supervision_followups;
 CREATE POLICY "supervision_followups_select" ON public.supervision_followups
     FOR SELECT TO authenticated
     USING (
@@ -282,6 +295,7 @@ CREATE POLICY "supervision_followups_select" ON public.supervision_followups
         )
     );
 
+DROP POLICY IF EXISTS "supervision_followups_manage" ON public.supervision_followups;
 CREATE POLICY "supervision_followups_manage" ON public.supervision_followups
     FOR ALL TO authenticated
     USING (
@@ -327,7 +341,7 @@ FOR EACH ROW EXECUTE FUNCTION public.enforce_supervision_lock();
 INSERT INTO public.supervision_instruments (
     id, name, supervision_type, description, scale_min, scale_max, scale_type, is_active
 ) VALUES (
-    'ins-00000000-0000-0000-0000-000000000001',
+    'f0000000-0000-0000-0000-000000000001',
     'Instrumen Observasi KBM Pembelajaran Mendalam & Berbasis Cinta',
     'Pelaksanaan_KBM',
     'Standar evaluasi supervisi klinis dan pembelajaran mendalam berkarakter ke-Ma’arif-an',
@@ -337,22 +351,22 @@ INSERT INTO public.supervision_instruments (
 -- Aspek Default
 INSERT INTO public.supervision_aspects (id, instrument_id, name, order_index, weight, description)
 VALUES
-    ('asp-001', 'ins-00000000-0000-0000-0000-000000000001', 'Perencanaan Pembelajaran', 1, 1.00, 'Kesiapan Modul Ajar, TP, ATP, dan media'),
-    ('asp-002', 'ins-00000000-0000-0000-0000-000000000001', 'Pelaksanaan Pembelajaran Mendalam (Deep Learning)', 2, 1.50, 'Aktivitas pemahaman bermakna, berpikir kritis, dan kolaborasi'),
-    ('asp-003', 'ins-00000000-0000-0000-0000-000000000001', 'Penerapan Kurikulum Berbasis Cinta', 3, 1.50, 'Iklim kasih sayang, penghargaan pada siswa, dan akhlak karimah'),
-    ('asp-004', 'ins-00000000-0000-0000-0000-000000000001', 'Pengelolaan Kelas & Interaksi', 4, 1.00, 'Kondusifitas ruang belajar dan manajemen waktu'),
-    ('asp-005', 'ins-00000000-0000-0000-0000-000000000001', 'Asesmen Formatif & Refleksi', 5, 1.00, 'Umpan balik langsung dan refleksi bersama murid')
+    ('f1000000-0000-0000-0000-000000000001', 'f0000000-0000-0000-0000-000000000001', 'Perencanaan Pembelajaran', 1, 1.00, 'Kesiapan Modul Ajar, TP, ATP, dan media'),
+    ('f1000000-0000-0000-0000-000000000002', 'f0000000-0000-0000-0000-000000000001', 'Pelaksanaan Pembelajaran Mendalam (Deep Learning)', 2, 1.50, 'Aktivitas pemahaman bermakna, berpikir kritis, dan kolaborasi'),
+    ('f1000000-0000-0000-0000-000000000003', 'f0000000-0000-0000-0000-000000000001', 'Penerapan Kurikulum Berbasis Cinta', 3, 1.50, 'Iklim kasih sayang, penghargaan pada siswa, dan akhlak karimah'),
+    ('f1000000-0000-0000-0000-000000000004', 'f0000000-0000-0000-0000-000000000001', 'Pengelolaan Kelas & Interaksi', 4, 1.00, 'Kondusifitas ruang belajar dan manajemen waktu'),
+    ('f1000000-0000-0000-0000-000000000005', 'f0000000-0000-0000-0000-000000000001', 'Asesmen Formatif & Refleksi', 5, 1.00, 'Umpan balik langsung dan refleksi bersama murid')
 ON CONFLICT DO NOTHING;
 
 -- Indikator Default
 INSERT INTO public.supervision_indicators (id, aspect_id, code, name, description, order_index, max_score)
 VALUES
-    ('ind-101', 'asp-001', '1.1', 'Kesesuaian TP dengan Karakteristik Siswa', 'Tujuan pembelajaran jelas dan terukur', 1, 4.00),
-    ('ind-102', 'asp-001', '1.2', 'Kesiapan Lembar Kerja Peserta Didik (LKPD)', 'LKPD memfasilitasi eksplorasi mandiri', 2, 4.00),
-    ('ind-201', 'asp-002', '2.1', 'Stimulasi Berpikir Kritis & Reflektif', 'Guru memantik pertanyaan terbuka dan mendalam', 1, 4.00),
-    ('ind-202', 'asp-002', '2.2', 'Konstruksi Pengetahuan Kontekstual', 'Mengaitkan materi dengan kehidupan nyata santri', 2, 4.00),
-    ('ind-301', 'asp-003', '3.1', 'Interaksi Kasih Sayang & Keteladanan', 'Komunikasi santun, ramah anak, dan tanpa kekerasan', 1, 4.00),
-    ('ind-302', 'asp-003', '3.2', 'Penguatan Nilai Rahmatan lil Alamin', 'Menanamkan rasa syukur, persaudaraan, dan empati', 2, 4.00),
-    ('ind-401', 'asp-004', '4.1', 'Keterlibatan Aktif Seluruh Murid', 'Semua anak berpartisipasi setara tanpa diskriminasi', 1, 4.00),
-    ('ind-501', 'asp-005', '5.1', 'Pemberian Umpan Balik Positif Konstruktif', 'Guru mengapresiasi usaha dan memberikan arahan perbaikan', 1, 4.00)
+    ('f2000000-0000-0000-0000-000000000101', 'f1000000-0000-0000-0000-000000000001', '1.1', 'Kesesuaian TP dengan Karakteristik Siswa', 'Tujuan pembelajaran jelas dan terukur', 1, 4.00),
+    ('f2000000-0000-0000-0000-000000000102', 'f1000000-0000-0000-0000-000000000001', '1.2', 'Kesiapan Lembar Kerja Peserta Didik (LKPD)', 'LKPD memfasilitasi eksplorasi mandiri', 2, 4.00),
+    ('f2000000-0000-0000-0000-000000000201', 'f1000000-0000-0000-0000-000000000002', '2.1', 'Stimulasi Berpikir Kritis & Reflektif', 'Guru memantik pertanyaan terbuka dan mendalam', 1, 4.00),
+    ('f2000000-0000-0000-0000-000000000202', 'f1000000-0000-0000-0000-000000000002', '2.2', 'Konstruksi Pengetahuan Kontekstual', 'Mengaitkan materi dengan kehidupan nyata santri', 2, 4.00),
+    ('f2000000-0000-0000-0000-000000000301', 'f1000000-0000-0000-0000-000000000003', '3.1', 'Interaksi Kasih Sayang & Keteladanan', 'Komunikasi santun, ramah anak, dan tanpa kekerasan', 1, 4.00),
+    ('f2000000-0000-0000-0000-000000000302', 'f1000000-0000-0000-0000-000000000003', '3.2', 'Penguatan Nilai Rahmatan lil Alamin', 'Menanamkan rasa syukur, persaudaraan, dan empati', 2, 4.00),
+    ('f2000000-0000-0000-0000-000000000401', 'f1000000-0000-0000-0000-000000000004', '4.1', 'Keterlibatan Aktif Seluruh Murid', 'Semua anak berpartisipasi setara tanpa diskriminasi', 1, 4.00),
+    ('f2000000-0000-0000-0000-000000000501', 'f1000000-0000-0000-0000-000000000005', '5.1', 'Pemberian Umpan Balik Positif Konstruktif', 'Guru mengapresiasi usaha dan memberikan arahan perbaikan', 1, 4.00)
 ON CONFLICT DO NOTHING;
