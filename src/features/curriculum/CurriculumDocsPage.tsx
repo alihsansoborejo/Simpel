@@ -3,6 +3,7 @@ import { curriculumService } from '../../services/curriculumService';
 import { DocumentLink, DocumentStatus } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { useGoogleDrive } from '../../context/GoogleDriveContext';
+import { fileStorageService } from '../../services/fileStorageService';
 import {
   FolderSync,
   ExternalLink,
@@ -74,11 +75,16 @@ export const CurriculumDocsPage: React.FC = () => {
       const cleanTitle = title.trim() || fileToUpload.name.replace(/\.[^/.]+$/, '');
       const fileNameToUse = title.trim() ? `${cleanTitle}.${fileExt}` : fileToUpload.name;
 
-      const uploaded = await uploadFile(
-        fileToUpload,
-        fileNameToUse,
-        `Dokumen ${docType} diunggah oleh ${user?.profile.full_name || 'Guru Madrasah'}`
-      );
+      // Simpan langsung ke penyimpanan berkas aplikasi (IndexedDB)
+      const config = fileStorageService.getConfig();
+      const saved = await fileStorageService.saveDocumentFile({
+        file: fileToUpload,
+        name: fileNameToUse,
+        category: docType,
+        uploadedBy: user?.profile.full_name || 'Guru Madrasah',
+      });
+
+      const finalDriveUrl = saved.googleDriveUrl || config.sharedFolderUrl || 'https://drive.google.com';
 
       await curriculumService.createDocument({
         teacher_id: user?.teacherId || 'tch-1',
@@ -88,8 +94,8 @@ export const CurriculumDocsPage: React.FC = () => {
         subject_id: 'sbj-ind',
         document_type: docType,
         title: cleanTitle,
-        google_drive_url: uploaded.webViewLink || 'https://drive.google.com',
-        file_id: uploaded.id,
+        google_drive_url: finalDriveUrl,
+        file_id: saved.id,
         status: 'Draft',
         submission_date: null,
       });
@@ -98,11 +104,11 @@ export const CurriculumDocsPage: React.FC = () => {
       setTitle('');
       setDriveUrl('');
       setFileToUpload(null);
-      setStatusMessage(`Berkas "${fileNameToUse}" berhasil diunggah ke Google Drive dan tercatat dalam sistem!`);
+      setStatusMessage(`Berkas "${fileNameToUse}" berhasil diunggah dan disimpan di sistem!`);
       loadDocs();
       setTimeout(() => setStatusMessage(null), 4000);
     } catch (err: any) {
-      alert(`Gagal mengunggah ke Google Drive: ${err?.message || 'Terjadi kesalahan'}`);
+      alert(`Gagal menyimpan berkas: ${err?.message || 'Terjadi kesalahan'}`);
     } finally {
       setIsUploadingToDrive(false);
     }
@@ -465,38 +471,18 @@ export const CurriculumDocsPage: React.FC = () => {
             </div>
 
             {modalTab === 'upload' ? (
-              <div>
-                {!isConnected ? (
-                  <div className="text-center py-6 px-4 bg-slate-50 border border-slate-200 rounded-lg">
-                    <HardDrive className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                    <p className="text-xs font-semibold text-slate-800 mb-1">
-                      Sambungkan Akun Google Terlebih Dahulu
-                    </p>
-                    <p className="text-[11px] text-slate-500 mb-3 max-w-sm mx-auto">
-                      Untuk mengunggah berkas langsung dari laptop/HP ke Google Drive madrasah, silakan hubungkan akun Google Anda.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={connect}
-                      disabled={isConnecting}
-                      className="inline-flex items-center gap-2 px-3.5 py-1.5 bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer"
-                    >
-                      <span>{isConnecting ? 'Menghubungkan...' : 'Sambungkan Google Drive'}</span>
-                    </button>
+              <form onSubmit={handleDirectUploadToDrive} className="space-y-3.5">
+                <div className="bg-emerald-50/80 border border-emerald-200 p-2.5 rounded-lg flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-emerald-950 font-medium">
+                      Penyimpanan Berkas Mandiri &amp; Google Drive Aktif
+                    </span>
                   </div>
-                ) : (
-                  <form onSubmit={handleDirectUploadToDrive} className="space-y-3.5">
-                    <div className="bg-emerald-50/80 border border-emerald-200 p-2.5 rounded-lg flex items-center justify-between text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                        <span className="text-emerald-900 font-medium">
-                          Tersambung: <strong>{googleUser?.email}</strong>
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-emerald-700 bg-white px-2 py-0.5 rounded border border-emerald-200">
-                        Folder SIMPEL
-                      </span>
-                    </div>
+                  <span className="text-[10px] text-emerald-800 bg-white px-2 py-0.5 rounded border border-emerald-200 font-semibold">
+                    Siap Pakai
+                  </span>
+                </div>
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -564,8 +550,6 @@ export const CurriculumDocsPage: React.FC = () => {
                       </button>
                     </div>
                   </form>
-                )}
-              </div>
             ) : (
               <form onSubmit={handleCreateDocument} className="space-y-4">
                 <div>
