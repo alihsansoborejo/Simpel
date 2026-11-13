@@ -196,7 +196,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
               </button>
 
               <button
-                onClick={() => onNavigate('master-guru')}
+                onClick={() => onNavigate('penugasan-guru')}
                 className="p-3.5 rounded-lg border border-slate-200 hover:border-emerald-600 hover:bg-emerald-50/40 text-left transition-colors flex items-start justify-between"
               >
                 <div>

@@ -40,7 +40,7 @@ export const AcademicSettingsPage: React.FC = () => {
     hasAuthSession: false,
     authEmail: null,
     tablesReady: 0,
-    totalChecked: 8,
+    totalChecked: 9,
     errorMessage: null,
   });
 
@@ -54,7 +54,7 @@ export const AcademicSettingsPage: React.FC = () => {
         hasAuthSession: false,
         authEmail: null,
         tablesReady: 0,
-        totalChecked: 8,
+        totalChecked: 9,
         errorMessage: 'Variabel lingkungan VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY belum diatur pada Secrets.',
       });
       return;
@@ -70,12 +70,17 @@ export const AcademicSettingsPage: React.FC = () => {
       'students',
       'supervision_records',
       'notifications',
+      'app_sync_state',
     ];
 
     try {
       const [{ data: sessionData }, ...results] = await Promise.all([
         supabase.auth.getSession(),
-        ...tablesToCheck.map((tbl) => supabase.from(tbl).select('id', { count: 'exact', head: true })),
+        ...tablesToCheck.map((tbl) =>
+          tbl === 'app_sync_state'
+            ? supabase.from(tbl).select('key', { count: 'exact', head: true })
+            : supabase.from(tbl).select('id', { count: 'exact', head: true })
+        ),
       ]);
       const sessionUser = sessionData?.session?.user || null;
       const readyCount = results.filter((r) => !r.error || r.error.code !== '42P01').length;

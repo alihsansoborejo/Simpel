@@ -1,13 +1,21 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
+import { academicService } from '../../services/academicService';
 import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
+  Subject,
+  ClassRoom,
+  TeachingAssignment,
+  SystemSettings,
+  Teacher,
+} from '../../types/database.types';
+import {
   KisiKisiItem,
   SoalAsesmenItem,
   EvaluationScopeKey,
-  LingkupMateriConfig,
 } from '../../types/curriculum.types';
 import { GradesPage } from './GradesPage';
 import { RemedialEnrichmentPage } from './RemedialEnrichmentPage';
@@ -18,19 +26,14 @@ import {
   FileSpreadsheet,
   Printer,
   Sparkles,
-  Search,
   Trash2,
   CheckCircle2,
+  AlertCircle,
   X,
   FileText,
   TrendingUp,
   HelpCircle,
-  FolderSync,
   Layers,
-  ChevronRight,
-  BookOpen,
-  Info,
-  Calendar,
   Check,
 } from 'lucide-react';
 
@@ -52,12 +55,23 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
   initialScope = 'LM1',
   onNavigate,
 }) => {
-  const { user } = useAuth();
+  const { user, activeRole } = useAuth();
+  const { selectedSubjectId, selectedClassLevel, setWorkspaceSelection } = useWorkspace();
   const [activeTab, setActiveTab] = useState<EvaluationTab>(defaultTab);
 
+  // Master & Assignment States
+  const [allSubjects, setAllSubjects] = useState<Subject[]>([]);
+  const [allClasses, setAllClasses] = useState<ClassRoom[]>([]);
+  const [teacherAssignments, setTeacherAssignments] = useState<TeachingAssignment[]>([]);
+  const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [activeYearName, setActiveYearName] = useState<string>('2026/2027');
+  const [activeSemesterType, setActiveSemesterType] = useState<'Ganjil' | 'Genap'>('Ganjil');
+  const [kktpDefault, setKktpDefault] = useState<number>(75);
+
   // Filter Mata Pelajaran & Kelas
-  const [selectedSubject, setSelectedSubject] = useState<string>('sbj-ind');
-  const [selectedClass, setSelectedClass] = useState<number>(4);
+  const [selectedSubject, setSelectedSubject] = useState<string>(selectedSubjectId || '');
+  const [selectedClass, setSelectedClass] = useState<number>(selectedClassLevel || 4);
 
   // Filter Lingkup Materi (LM) & Asesmen Khusus (STS / SAS)
   const [selectedScope, setSelectedScope] = useState<EvaluationScopeKey>(initialScope);
@@ -111,26 +125,133 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
     }
   }, [initialScope]);
 
-  const loadData = () => {
+  // Sinkronisasi dengan WorkspaceContext
+  useEffect(() => {
+    if (selectedSubjectId) {
+      setSelectedSubject(selectedSubjectId);
+    }
+    if (selectedClassLevel) {
+      setSelectedClass(selectedClassLevel);
+    }
+  }, [selectedSubjectId, selectedClassLevel]);
+
+  const loadData = useCallback(async () => {
     setKisiList(curriculumWorkspaceService.getKisiList());
     setSoalList(curriculumWorkspaceService.getSoalList());
-  };
+
+    try {
+      const [sbjs, clss, asgs, sys, years, sems, teacher] = await Promise.all([
+        academicService.getSubjects(),
+        academicService.getClasses(),
+        academicService.getTeachingAssignments(),
+        academicService.getSettings(),
+        academicService.getAcademicYears(),
+        academicService.getSemesters(),
+        academicService.resolveTeacherForUser(user),
+      ]);
+
+      setAllSubjects(sbjs);
+      setAllClasses(clss);
+      setSettings(sys);
+      setResolvedTeacher(teacher);
+      if (sys?.kktp_default) setKktpDefault(Number(sys.kktp_default));
+
+      const actYear = years.find((y) => y.id === sys.active_academic_year_id || y.is_active) || years[0];
+      const actSem = sems.find((s) => s.id === sys.active_semester_id || s.is_active) || sems[0];
+      if (actYear?.name) setActiveYearName(actYear.name);
+      if (actSem?.semester_type) setActiveSemesterType(actSem.semester_type);
+
+      const relevantAsgs =
+        activeRole === 'guru'
+          ? teacher
+            ? asgs.filter((a) => a.teacher_id === teacher.id)
+            : []
+          : asgs;
+      setTeacherAssignments(relevantAsgs);
+
+      if (activeRole === 'guru') {
+        if (relevantAsgs.length > 0) {
+          const validSubjectIds = Array.from(new Set(relevantAsgs.map((a) => a.subject_id)));
+          const preferredSbj =
+            (selectedSubjectId && validSubjectIds.includes(selectedSubjectId) && selectedSubjectId) ||
+            (selectedSubject && validSubjectIds.includes(selectedSubject) && selectedSubject) ||
+            validSubjectIds[0];
+
+          const slotsForSbj = relevantAsgs.filter((a) => a.subject_id === preferredSbj);
+          const validLevels = slotsForSbj
+            .map((a) => a.class?.level || clss.find((c) => c.id === a.class_id)?.level || 0)
+            .filter((lvl) => lvl > 0);
+          const preferredLevel =
+            (selectedClassLevel && validLevels.includes(selectedClassLevel) && selectedClassLevel) ||
+            (validLevels.includes(selectedClass) && selectedClass) ||
+            validLevels[0] ||
+            4;
+
+          setSelectedSubject(preferredSbj);
+          setSelectedClass(preferredLevel);
+        } else {
+          setSelectedSubject('');
+        }
+      } else {
+        const preferredSbj =
+          (selectedSubjectId && sbjs.some((s) => s.id === selectedSubjectId) && selectedSubjectId) ||
+          (selectedSubject && sbjs.some((s) => s.id === selectedSubject) && selectedSubject) ||
+          sbjs[0]?.id ||
+          '';
+        setSelectedSubject(preferredSbj);
+        if (selectedClassLevel) {
+          setSelectedClass(selectedClassLevel);
+        } else if (clss.length > 0 && !clss.some((c) => c.level === selectedClass)) {
+          setSelectedClass(clss[0].level);
+        }
+      }
+    } catch (err) {
+      console.error('Gagal memuat data referensi evaluasi:', err);
+    }
+  }, [activeRole, user?.id, user?.teacherId, selectedSubjectId, selectedClassLevel]);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    void loadData();
+  }, [loadData]);
 
-  useRealtimeSync(['simpel_mi_kisi_items_v1', 'simpel_mi_soal_items_v1'], () => {
-    loadData();
-  });
+  useRealtimeSync(
+    ['simpel_mi_kisi_items_v1', 'simpel_mi_soal_items_v1', 'simpel_assignments', 'simpel_subjects', 'simpel_classes', 'simpel_teachers'],
+    () => {
+      void loadData();
+    }
+  );
 
   const notify = (msg: string) => {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3500);
   };
 
+  const availableSubjects: Subject[] =
+    activeRole === 'guru'
+      ? allSubjects.filter((s) => teacherAssignments.some((a) => a.subject_id === s.id))
+      : allSubjects;
+
+  const availableClasses: ClassRoom[] =
+    activeRole === 'guru'
+      ? allClasses.filter((c) =>
+          teacherAssignments.some(
+            (a) =>
+              a.class_id === c.id && (!selectedSubject || a.subject_id === selectedSubject)
+          )
+        )
+      : allClasses;
+
+  const currentSubjectObj =
+    availableSubjects.find((s) => s.id === selectedSubject) ||
+    allSubjects.find((s) => s.id === selectedSubject);
+  const currentSubjectName = currentSubjectObj?.name || 'Mata Pelajaran';
+
   // Daftar Lingkup Materi yang tersedia untuk mapel dan kelas aktif
-  const availableScopes = curriculumWorkspaceService.getLingkupMateriList(selectedSubject, selectedClass);
+  const availableScopes = curriculumWorkspaceService.getLingkupMateriList(
+    selectedSubject,
+    selectedClass,
+    activeSemesterType
+  );
   const currentScopeConfig =
     availableScopes.find((s) => s.scope_key === selectedScope) || availableScopes[0];
 
@@ -211,7 +332,6 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
 
   const handlePrint = () => {
     const scopeLabel = currentScopeConfig ? currentScopeConfig.label : selectedScope;
-    const currentSubjectName = selectedSubject === 'sbj-ind' ? 'Bahasa Indonesia' : 'IPAS';
     let title = `PERANGKAT EVALUASI & ASESMEN (${scopeLabel})`;
     let contentHtml = '';
 
@@ -268,23 +388,26 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
         { label: 'Mata Pelajaran', value: currentSubjectName },
         { label: 'Tingkat Rombel', value: `Kelas ${selectedClass}` },
         { label: 'Lingkup Materi', value: scopeLabel },
-        { label: 'Tahun Pelajaran', value: '2025/2026 (Semester Ganjil)' },
+        { label: 'Tahun Pelajaran', value: `${activeYearName} (Semester ${activeSemesterType})` },
       ],
       signature: {
         leftTitle: 'Guru Pengampu / Penyusun Soal,',
-        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
-        leftNip: '198503122019031008',
+        leftName: user?.profile?.full_name || resolvedTeacher?.full_name || 'Guru Pengampu',
+        leftNip: resolvedTeacher?.nip || '-',
         rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
         rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
-        rightName: 'MUIN, S.Pd.I',
-        rightNip: '197508152005011004',
+        rightName: settings?.principal_name || 'Kepala Madrasah',
+        rightNip: settings?.principal_nip || '-',
       },
     });
   };
 
   const handleSubmitForm = (e: React.FormEvent) => {
     e.preventDefault();
-    const currentSubjectName = selectedSubject === 'sbj-ind' ? 'Bahasa Indonesia' : 'IPAS';
+    if (!selectedSubject) {
+      notify('Pilih mata pelajaran terlebih dahulu.');
+      return;
+    }
 
     if (activeTab === 'kisi-kisi') {
       const item: KisiKisiItem = {
@@ -455,21 +578,53 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
           PENGATURAN MATA PELAJARAN & SUB-MENU PER LINGKUP MATERI (LM) / STS / SAS
           ========================================================================= */}
       <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4 shadow-xs">
+        {/* Banner jika guru belum memiliki penugasan */}
+        {activeRole === 'guru' && availableSubjects.length === 0 && (
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              Belum ada penugasan mata pelajaran dan kelas untuk akun Anda. Hubungi Admin Madrasah untuk menetapkan jadwal mengajar di menu <strong>Penugasan Mengajar</strong>.
+            </span>
+          </div>
+        )}
+
         {/* Baris 1: Pemilihan Mapel & Kelas */}
         <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-xs border-b border-slate-100 pb-3">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1.5">
               <span className="font-semibold text-slate-600">Mata Pelajaran:</span>
               <select
                 value={selectedSubject}
                 onChange={(e) => {
-                  setSelectedSubject(e.target.value);
+                  const nextSbj = e.target.value;
+                  setSelectedSubject(nextSbj);
                   setSelectedScope('LM1');
+                  const slots = teacherAssignments.filter((a) => a.subject_id === nextSbj);
+                  const firstSlot = slots[0];
+                  const nextClassObj = firstSlot
+                    ? allClasses.find((c) => c.id === firstSlot.class_id)
+                    : allClasses.find((c) => c.level === selectedClass);
+                  const nextLvl = nextClassObj?.level || selectedClass;
+                  setSelectedClass(nextLvl);
+                  setWorkspaceSelection({
+                    subjectId: nextSbj,
+                    classId: nextClassObj?.id || null,
+                    classLevel: nextLvl,
+                    assignmentId: firstSlot?.id || null,
+                  });
                 }}
-                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-800"
+                disabled={availableSubjects.length === 0}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-800 disabled:bg-slate-100"
               >
-                <option value="sbj-ind">Bahasa Indonesia</option>
-                <option value="sbj-ipas">IPAS</option>
+                {availableSubjects.length === 0 ? (
+                  <option value="">Belum ada penugasan mapel</option>
+                ) : (
+                  availableSubjects.map((sbj) => (
+                    <option key={sbj.id} value={sbj.id}>
+                      {sbj.name}
+                    </option>
+                  ))
+                )}
               </select>
             </div>
 
@@ -477,21 +632,38 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
               <span className="font-semibold text-slate-600">Kelas:</span>
               <select
                 value={selectedClass}
-                onChange={(e) => setSelectedClass(Number(e.target.value))}
-                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-800"
+                onChange={(e) => {
+                  const nextLvl = Number(e.target.value);
+                  setSelectedClass(nextLvl);
+                  const matchedCls = allClasses.find((c) => c.level === nextLvl);
+                  const matchedAsg = teacherAssignments.find(
+                    (a) => a.subject_id === selectedSubject && a.class_id === matchedCls?.id
+                  );
+                  setWorkspaceSelection({
+                    subjectId: selectedSubject || null,
+                    classId: matchedCls?.id || null,
+                    classLevel: nextLvl,
+                    assignmentId: matchedAsg?.id || null,
+                  });
+                }}
+                disabled={availableClasses.length === 0}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-800 disabled:bg-slate-100"
               >
-                <option value={4}>Kelas 4 (Fase B)</option>
-                <option value={1}>Kelas 1 (Fase A)</option>
-                <option value={2}>Kelas 2 (Fase A)</option>
-                <option value={3}>Kelas 3 (Fase B)</option>
-                <option value={5}>Kelas 5 (Fase C)</option>
-                <option value={6}>Kelas 6 (Fase C)</option>
+                {availableClasses.length === 0 ? (
+                  <option value={selectedClass}>Belum ada rombel</option>
+                ) : (
+                  availableClasses.map((cls) => (
+                    <option key={cls.id} value={cls.level}>
+                      {cls.name} (Fase {cls.phase})
+                    </option>
+                  ))
+                )}
               </select>
             </div>
           </div>
 
           <div className="text-[11px] text-slate-500">
-            Semester: <strong className="text-emerald-800">Ganjil (2026/2027)</strong> · KKTP: <strong className="text-amber-800">75</strong>
+            Semester: <strong className="text-emerald-800">{activeSemesterType} ({activeYearName})</strong> · KKTP: <strong className="text-amber-800">{kktpDefault}</strong>
           </div>
         </div>
 

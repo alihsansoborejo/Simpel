@@ -8,13 +8,13 @@ import {
 import {
   DEMO_SUPERVISION_RECORDS,
   DEMO_INSTRUMENTS,
-  DEMO_TEACHERS,
-  DEMO_CLASSES,
-  DEMO_SUBJECTS,
 } from '../lib/demoData';
+import { academicService } from './academicService';
 
 const STORAGE_KEY = 'simpel_supervision_records';
 const INSTRUMENTS_KEY = 'simpel_supervision_instruments';
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v?: string | null) => typeof v === 'string' && UUID_REGEX.test(v);
 
 function getLocal<T>(key: string, fallback: T): T {
   try {
@@ -40,66 +40,98 @@ export const supervisionService = {
     semesterId?: string;
     supervisionType?: string;
   }): Promise<SupervisionRecord[]> {
+    let baseRecords = getLocal<SupervisionRecord[]>(STORAGE_KEY, DEMO_SUPERVISION_RECORDS);
+
     if (isSupabaseConfigured) {
       try {
-        let query = supabase
+        const { data, error } = await supabase
           .from('supervision_records')
           .select('*, teacher:teachers(*), class:classes(*), subject:subjects(*), supervisor:profiles(*)')
           .order('supervision_date', { ascending: false });
 
-        if (filters?.teacherId) query = query.eq('teacher_id', filters.teacherId);
-        if (filters?.academicYearId) query = query.eq('academic_year_id', filters.academicYearId);
-        if (filters?.semesterId) query = query.eq('semester_id', filters.semesterId);
-        if (filters?.supervisionType) query = query.eq('supervision_type', filters.supervisionType);
-
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) return data as SupervisionRecord[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const seen = new Set(baseRecords.map((r) => r.id));
+          const merged = [...baseRecords];
+          for (const item of data as SupervisionRecord[]) {
+            if (!seen.has(item.id)) {
+              merged.push(item);
+              seen.add(item.id);
+            }
+          }
+          baseRecords = merged;
+        }
       } catch (err) {
         console.warn('Supabase getRecords fallback:', err);
       }
     }
 
-    let records = getLocal<SupervisionRecord[]>(STORAGE_KEY, DEMO_SUPERVISION_RECORDS);
+    const [teachers, classes, subjects] = await Promise.all([
+      academicService.getTeachers(),
+      academicService.getClasses(),
+      academicService.getSubjects(),
+    ]);
+
+    let records = baseRecords.map((r) => ({
+      ...r,
+      teacher: teachers.find((t) => t.id === r.teacher_id) || r.teacher,
+      class: classes.find((c) => c.id === r.class_id) || r.class,
+      subject: subjects.find((s) => s.id === r.subject_id) || r.subject,
+    }));
+
     if (filters?.teacherId) records = records.filter((r) => r.teacher_id === filters.teacherId);
     if (filters?.academicYearId) records = records.filter((r) => r.academic_year_id === filters.academicYearId);
     if (filters?.semesterId) records = records.filter((r) => r.semester_id === filters.semesterId);
     if (filters?.supervisionType) records = records.filter((r) => r.supervision_type === filters.supervisionType);
 
-    return records.map((r) => ({
-      ...r,
-      teacher: r.teacher || DEMO_TEACHERS.find((t) => t.id === r.teacher_id),
-      class: r.class || DEMO_CLASSES.find((c) => c.id === r.class_id),
-      subject: r.subject || DEMO_SUBJECTS.find((s) => s.id === r.subject_id),
-    }));
+    return records.sort((a, b) => b.supervision_date.localeCompare(a.supervision_date));
   },
 
   async createRecord(
     payload: Omit<SupervisionRecord, 'id' | 'created_at' | 'updated_at'>
   ): Promise<SupervisionRecord> {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `spv-${Date.now()}`;
-    const newRecord: SupervisionRecord = {
+    const [teachers, classes, subjects] = await Promise.all([
+      academicService.getTeachers(),
+      academicService.getClasses(),
+      academicService.getSubjects(),
+    ]);
+
+    let newRecord: SupervisionRecord = {
       ...payload,
       id,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      teacher: DEMO_TEACHERS.find((t) => t.id === payload.teacher_id),
-      class: DEMO_CLASSES.find((c) => c.id === payload.class_id),
-      subject: DEMO_SUBJECTS.find((s) => s.id === payload.subject_id),
+      teacher: teachers.find((t) => t.id === payload.teacher_id),
+      class: classes.find((c) => c.id === payload.class_id),
+      subject: subjects.find((s) => s.id === payload.subject_id),
       followups: [],
     };
 
-    if (isSupabaseConfigured) {
+    if (
+      isSupabaseConfigured &&
+      isUuid(id) &&
+      isUuid(payload.teacher_id) &&
+      isUuid(payload.class_id) &&
+      isUuid(payload.subject_id)
+    ) {
       try {
         const { teacher: _t, class: _c, subject: _s, supervisor: _sup, results: _res, followups: _f, ...dbPayload } = newRecord;
         const { data } = await supabase.from('supervision_records').insert(dbPayload).select().single();
-        if (data) return data as SupervisionRecord;
+        if (data) {
+          newRecord = {
+            ...(data as SupervisionRecord),
+            teacher: newRecord.teacher,
+            class: newRecord.class,
+            subject: newRecord.subject,
+          };
+        }
       } catch (err) {
         console.warn('Supabase createRecord fallback:', err);
       }
     }
 
-    const current = await this.getRecords();
-    const updated = [newRecord, ...current];
+    const current = getLocal<SupervisionRecord[]>(STORAGE_KEY, DEMO_SUPERVISION_RECORDS);
+    const updated = [newRecord, ...current.filter((r) => r.id !== newRecord.id)];
     setLocal(STORAGE_KEY, updated);
     return newRecord;
   },
@@ -115,7 +147,7 @@ export const supervisionService = {
       updated_at: new Date().toISOString(),
     };
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id)) {
       try {
         const { teacher: _t, class: _c, subject: _s, supervisor: _sup, results: _res, followups: _f, ...dbUpdates } = updates;
         await supabase.from('supervision_records').update(dbUpdates).eq('id', id);
@@ -124,7 +156,10 @@ export const supervisionService = {
       }
     }
 
-    const updatedList = records.map((r) => (r.id === id ? updatedRecord : r));
+    const current = getLocal<SupervisionRecord[]>(STORAGE_KEY, DEMO_SUPERVISION_RECORDS);
+    const updatedList = current.some((r) => r.id === id)
+      ? current.map((r) => (r.id === id ? updatedRecord : r))
+      : [updatedRecord, ...current];
     setLocal(STORAGE_KEY, updatedList);
     return updatedRecord;
   },

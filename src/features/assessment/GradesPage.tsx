@@ -1,8 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { assessmentService } from '../../services/assessmentService';
 import { academicService } from '../../services/academicService';
-import { Assessment, Grade, Student, AssessmentType, TeachingAssignment } from '../../types/database.types';
+import {
+  Assessment,
+  Grade,
+  Student,
+  AssessmentType,
+  TeachingAssignment,
+  ClassMember,
+  Teacher,
+  SystemSettings,
+} from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
@@ -11,9 +21,6 @@ import {
   Save,
   CheckCircle,
   AlertCircle,
-  BookOpen,
-  Calendar,
-  Layers,
   Printer,
   FileSpreadsheet,
 } from 'lucide-react';
@@ -23,10 +30,15 @@ interface GradesPageProps {
 }
 
 export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
-  const { user } = useAuth();
+  const { user, activeRole } = useAuth();
+  const { selectedAssignmentId, selectedSubjectId, selectedClassId, setWorkspaceSelection } =
+    useWorkspace();
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
+  const [classMembers, setClassMembers] = useState<ClassMember[]>([]);
+  const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState<string>('');
   const [grades, setGrades] = useState<Grade[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -39,64 +51,153 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
   const [newType, setNewType] = useState<AssessmentType>('Formatif');
   const [newDate, setNewDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [newKktp, setNewKktp] = useState<number>(75);
-  const [newAssignmentId, setNewAssignmentId] = useState<string>('asg-1');
+  const [newAssignmentId, setNewAssignmentId] = useState<string>('');
 
   // Input Map: studentId -> { score: number, feedback: string }
   const [scoreInputs, setScoreInputs] = useState<Record<string, { score: number; feedback: string }>>({});
 
-  const loadData = async () => {
+  const getStudentsForAssessment = useCallback(
+    (
+      asm: Assessment | undefined,
+      asgsPool: TeachingAssignment[],
+      stdsPool: Student[],
+      membersPool: ClassMember[]
+    ): Student[] => {
+      if (!asm) return [];
+      const linkedAsg = asm.assignment || asgsPool.find((a) => a.id === asm.assignment_id);
+      const classId = linkedAsg?.class_id;
+      if (!classId) return stdsPool;
+      const enrolledIds = membersPool.filter((m) => m.class_id === classId).map((m) => m.student_id);
+      return stdsPool.filter((s) => enrolledIds.includes(s.id));
+    },
+    []
+  );
+
+  const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [asms, asgs, stds] = await Promise.all([
+      const [asms, asgs, stds, members, teacher, sys] = await Promise.all([
         assessmentService.getAssessments(),
         academicService.getTeachingAssignments(),
         academicService.getStudents(),
+        academicService.getClassMembers(),
+        academicService.resolveTeacherForUser(user),
+        academicService.getSettings(),
       ]);
-      setAssessments(asms);
-      setAssignments(asgs);
-      setStudents(stds);
 
-      if (asms.length > 0) {
-        setSelectedAssessmentId(asms[0].id);
-        const grds = await assessmentService.getGrades(asms[0].id);
+      setResolvedTeacher(teacher);
+      setSettings(sys);
+      if (sys?.kktp_default) setNewKktp(Number(sys.kktp_default));
+
+      const scopedAsgs =
+        activeRole === 'guru'
+          ? teacher
+            ? asgs.filter((a) => a.teacher_id === teacher.id)
+            : []
+          : asgs;
+      const scopedAsgIds = new Set(scopedAsgs.map((a) => a.id));
+      const scopedAsms =
+        activeRole === 'guru'
+          ? asms.filter((a) => scopedAsgIds.has(a.assignment_id))
+          : asms;
+
+      setAssignments(scopedAsgs);
+      setAssessments(scopedAsms);
+      setStudents(stds);
+      setClassMembers(members);
+
+      const defaultAsg =
+        (selectedAssignmentId && scopedAsgs.find((a) => a.id === selectedAssignmentId)) ||
+        scopedAsgs.find(
+          (a) =>
+            (!selectedSubjectId || a.subject_id === selectedSubjectId) &&
+            (!selectedClassId || a.class_id === selectedClassId)
+        ) ||
+        scopedAsgs[0];
+      if (defaultAsg) setNewAssignmentId(defaultAsg.id);
+
+      if (scopedAsms.length > 0) {
+        const wsAsm =
+          (selectedAssignmentId && scopedAsms.find((a) => a.assignment_id === selectedAssignmentId)) ||
+          scopedAsms.find((a) => {
+            const linked = a.assignment || scopedAsgs.find((asg) => asg.id === a.assignment_id);
+            return (
+              linked &&
+              (!selectedSubjectId || linked.subject_id === selectedSubjectId) &&
+              (!selectedClassId || linked.class_id === selectedClassId)
+            );
+          });
+        const targetAsm = wsAsm || scopedAsms.find((a) => a.id === selectedAssessmentId) || scopedAsms[0];
+        setSelectedAssessmentId(targetAsm.id);
+
+        const grds = await assessmentService.getGrades(targetAsm.id);
         setGrades(grds);
 
+        const displayed = getStudentsForAssessment(targetAsm, scopedAsgs, stds, members);
+        const defaultScore = Number(targetAsm.kktp || sys?.kktp_default || 75);
         const initialMap: Record<string, { score: number; feedback: string }> = {};
-        stds.forEach((s) => {
+        displayed.forEach((s) => {
           const found = grds.find((g) => g.student_id === s.id);
           initialMap[s.id] = {
-            score: found ? Number(found.score) : 75,
+            score: found ? Number(found.score) : defaultScore,
             feedback: found?.feedback || '',
           };
         });
         setScoreInputs(initialMap);
+      } else {
+        setSelectedAssessmentId('');
+        setGrades([]);
+        setScoreInputs({});
       }
     } catch (err) {
       console.error('Gagal memuat data penilaian:', err);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [
+    activeRole,
+    user?.id,
+    user?.teacherId,
+    selectedAssignmentId,
+    selectedSubjectId,
+    selectedClassId,
+    getStudentsForAssessment,
+  ]);
 
   useEffect(() => {
-    loadData();
-  }, []);
-
-  useRealtimeSync(['simpel_assessments', 'simpel_grades', 'simpel_students', 'simpel_assignments'], () => {
     void loadData();
-  });
+  }, [loadData]);
+
+  useRealtimeSync(
+    ['simpel_assessments', 'simpel_grades', 'simpel_students', 'simpel_assignments', 'simpel_class_members', 'simpel_teachers'],
+    () => {
+      void loadData();
+    }
+  );
 
   const handleSelectAssessment = async (asmId: string) => {
     setSelectedAssessmentId(asmId);
+    const asm = assessments.find((a) => a.id === asmId);
+    const linked = asm?.assignment || assignments.find((a) => a.id === asm?.assignment_id);
+    if (linked) {
+      setWorkspaceSelection({
+        assignmentId: linked.id,
+        subjectId: linked.subject_id,
+        classId: linked.class_id,
+        classLevel: linked.class?.level || null,
+      });
+    }
     try {
       const grds = await assessmentService.getGrades(asmId);
       setGrades(grds);
 
+      const displayed = getStudentsForAssessment(asm, assignments, students, classMembers);
+      const defaultScore = Number(asm?.kktp || settings?.kktp_default || 75);
       const map: Record<string, { score: number; feedback: string }> = {};
-      students.forEach((s) => {
+      displayed.forEach((s) => {
         const found = grds.find((g) => g.student_id === s.id);
         map[s.id] = {
-          score: found ? Number(found.score) : 75,
+          score: found ? Number(found.score) : defaultScore,
           feedback: found?.feedback || '',
         };
       });
@@ -108,6 +209,7 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
 
   const handleCreateAssessment = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!newAssignmentId) return;
     try {
       const created = await assessmentService.createAssessment({
         assignment_id: newAssignmentId,
@@ -117,9 +219,10 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
         kktp: newKktp,
       });
       setShowAddModal(false);
+      setNewTitle('');
       setStatusMessage(`Asesmen "${newTitle}" berhasil dibuat.`);
-      loadData();
-      handleSelectAssessment(created.id);
+      await loadData();
+      await handleSelectAssessment(created.id);
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (err) {
       console.error('Gagal membuat asesmen:', err);
@@ -146,13 +249,17 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
     }));
   };
 
+  const currentAsm = assessments.find((a) => a.id === selectedAssessmentId);
+  const currentKktp = currentAsm ? Number(currentAsm.kktp) : Number(settings?.kktp_default || 75);
+  const displayedStudents = getStudentsForAssessment(currentAsm, assignments, students, classMembers);
+
   const handleSaveGrades = async () => {
     if (!selectedAssessmentId) return;
     setIsSaving(true);
     try {
-      const entries = students.map((s) => ({
+      const entries = displayedStudents.map((s) => ({
         studentId: s.id,
-        score: scoreInputs[s.id]?.score ?? 75,
+        score: scoreInputs[s.id]?.score ?? currentKktp,
         feedback: scoreInputs[s.id]?.feedback || null,
       }));
 
@@ -168,12 +275,9 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
     }
   };
 
-  const currentAsm = assessments.find((a) => a.id === selectedAssessmentId);
-  const currentKktp = currentAsm ? Number(currentAsm.kktp) : 75;
-
   const handlePrintDocument = () => {
     if (!currentAsm) return;
-    const tableRows = students.map((s, idx) => {
+    const tableRows = displayedStudents.map((s, idx) => {
       const g = grades.find((gr) => gr.student_id === s.id);
       const score = g ? g.score : 0;
       const passed = score >= currentKktp;
@@ -212,18 +316,18 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
       subtitle: `${currentAsm.title} - Ambang KKTP: ${currentKktp}`,
       metadata: [
         { label: 'Instrumen Asesmen', value: currentAsm.title },
-        { label: 'Tipe Asesmen', value: currentAsm.assessment_type.replace('_', ' ') },
+        { label: 'Tipe Asesmen', value: currentAsm.assessment_type.replace(/_/g, ' ') },
         { label: 'Ambang Batas KKTP', value: String(currentKktp) },
         { label: 'Tanggal Pelaksanaan', value: currentAsm.assessment_date },
       ],
       signature: {
         leftTitle: 'Guru Pengampu Mata Pelajaran,',
-        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
-        leftNip: '198503122019031008',
+        leftName: user?.profile?.full_name || resolvedTeacher?.full_name || 'Guru Pengampu',
+        leftNip: resolvedTeacher?.nip || '-',
         rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
         rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
-        rightName: 'MUIN, S.Pd.I',
-        rightNip: '197508152005011004',
+        rightName: settings?.principal_name || 'Kepala Madrasah',
+        rightNip: settings?.principal_nip || '-',
       },
     });
   };
@@ -295,13 +399,18 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
             <select
               value={selectedAssessmentId}
               onChange={(e) => handleSelectAssessment(e.target.value)}
-              className="text-xs font-bold text-slate-900 bg-white border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-emerald-600 mt-0.5"
+              disabled={assessments.length === 0}
+              className="text-xs font-bold text-slate-900 bg-white border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-emerald-600 mt-0.5 disabled:bg-slate-100"
             >
-              {assessments.map((a) => (
-                <option key={a.id} value={a.id}>
-                  [{a.assessment_type.replace('_', ' ')}] {a.title} ({a.assessment_date})
-                </option>
-              ))}
+              {assessments.length === 0 ? (
+                <option value="">Belum ada instrumen asesmen untuk mapel Anda</option>
+              ) : (
+                assessments.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    [{a.assessment_type.replace(/_/g, ' ')}] {a.title} ({a.assessment_date})
+                  </option>
+                ))
+              )}
             </select>
           </div>
         </div>
@@ -340,15 +449,21 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
                     Memuat daftar nilai...
                   </td>
                 </tr>
-              ) : students.length === 0 ? (
+              ) : !currentAsm ? (
                 <tr>
                   <td colSpan={5} className="py-8 text-center text-slate-400">
-                    Tidak ada siswa ditemukan.
+                    Belum ada instrumen asesmen untuk mata pelajaran yang Anda ampu. Klik &ldquo;Buat Asesmen Baru&rdquo; untuk memulai.
+                  </td>
+                </tr>
+              ) : displayedStudents.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-8 text-center text-slate-400">
+                    Belum ada siswa terdaftar di rombel ini.
                   </td>
                 </tr>
               ) : (
-                students.map((student, idx) => {
-                  const input = scoreInputs[student.id] || { score: 75, feedback: '' };
+                displayedStudents.map((student, idx) => {
+                  const input = scoreInputs[student.id] || { score: currentKktp, feedback: '' };
                   const isPassed = input.score >= currentKktp;
 
                   return (
@@ -421,11 +536,15 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
                   className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
                   required
                 >
-                  {assignments.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.class?.name || 'Kelas 4'} - {a.subject?.name || 'Bahasa Indonesia'}
-                    </option>
-                  ))}
+                  {assignments.length === 0 ? (
+                    <option value="">Belum ada penugasan mengajar</option>
+                  ) : (
+                    assignments.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.class?.name || '-'} - {a.subject?.name || 'Mata Pelajaran'}
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 

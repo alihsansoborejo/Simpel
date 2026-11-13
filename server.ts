@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { WebSocketServer, WebSocket } from 'ws';
+import zlib from 'zlib';
 
 dotenv.config();
 
@@ -266,32 +267,98 @@ function applySyncMutations(
   return { revision: syncState.revision, appliedKeys, deltaEntries };
 }
 
+const FAST_ENTRY_MAX_BYTES = 100 * 1024;
+
+function sendSyncJson(req: Request, res: Response, payload: Record<string, any>): void {
+  const jsonText = JSON.stringify(payload);
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  if (acceptEncoding.includes('gzip') && jsonText.length > 1024) {
+    try {
+      const compressed = zlib.gzipSync(Buffer.from(jsonText, 'utf-8'));
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.send(compressed);
+      return;
+    } catch {
+      // fallback to uncompressed JSON
+    }
+  }
+  res.json(payload);
+}
+
 // REST Endpoints untuk Sinkronisasi Cepat Antarperangkat
 app.get('/api/sync/state', (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   const since = Number(req.query.since || 0);
+  const priorityFast = req.query.priority === 'fast';
+  const maxEntryBytes = Number(req.query.maxEntryBytes || FAST_ENTRY_MAX_BYTES);
+
   if (since > 0) {
     const deltaEntries: Record<string, SyncEntry> = {};
+    const deferredKeys: string[] = [];
     for (const [key, entry] of Object.entries(syncState.entries)) {
       if (entry.revision > since) {
-        deltaEntries[key] = entry;
+        if (priorityFast && entry.value && entry.value.length > maxEntryBytes) {
+          deferredKeys.push(key);
+        } else {
+          deltaEntries[key] = entry;
+        }
       }
     }
-    return res.json({
+    return sendSyncJson(req, res, {
       revision: syncState.revision,
       full: false,
       entries: deltaEntries,
+      deferredKeys,
       activeClients: getActiveClientCount(),
       serverTime: new Date().toISOString(),
     });
   }
 
-  res.json({
+  if (priorityFast) {
+    const fastEntries: Record<string, SyncEntry> = {};
+    const deferredKeys: string[] = [];
+    for (const [key, entry] of Object.entries(syncState.entries)) {
+      if (entry.value && entry.value.length > maxEntryBytes) {
+        deferredKeys.push(key);
+      } else {
+        fastEntries[key] = entry;
+      }
+    }
+    return sendSyncJson(req, res, {
+      revision: syncState.revision,
+      full: deferredKeys.length === 0,
+      entries: fastEntries,
+      deferredKeys,
+      activeClients: getActiveClientCount(),
+      serverTime: new Date().toISOString(),
+    });
+  }
+
+  sendSyncJson(req, res, {
     revision: syncState.revision,
     full: true,
     entries: syncState.entries,
+    deferredKeys: [],
     activeClients: getActiveClientCount(),
+    serverTime: new Date().toISOString(),
+  });
+});
+
+app.get('/api/sync/key/:key', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  const key = String(req.params.key || '');
+  if (!key.startsWith('simpel_') || LOCAL_ONLY_KEYS.has(key)) {
+    return res.status(400).json({ error: 'Key sinkronisasi tidak valid.' });
+  }
+  const entry = syncState.entries[key] || null;
+  sendSyncJson(req, res, {
+    key,
+    entry,
+    revision: syncState.revision,
     serverTime: new Date().toISOString(),
   });
 });
@@ -1775,12 +1842,22 @@ async function startServer() {
 
     wsClients.set(ws, { clientId, connectedAt: Date.now() });
 
-    // Kirim state otoritatif awal secara instan saat koneksi terbuka
+    // Kirim state otoritatif awal secara instan saat koneksi terbuka (batasi entri >100KB agar frame WS tidak diputus proxy)
+    const wsInitEntries: Record<string, SyncEntry> = {};
+    const wsDeferredKeys: string[] = [];
+    for (const [key, entry] of Object.entries(syncState.entries)) {
+      if (entry.value && entry.value.length > FAST_ENTRY_MAX_BYTES) {
+        wsDeferredKeys.push(key);
+      } else {
+        wsInitEntries[key] = entry;
+      }
+    }
     ws.send(
       JSON.stringify({
         type: 'sync:init',
         revision: syncState.revision,
-        entries: syncState.entries,
+        entries: wsInitEntries,
+        deferredKeys: wsDeferredKeys,
         fileRevision: syncFilesState.revision,
         activeClients: getActiveClientCount(),
         serverTime: new Date().toISOString(),
@@ -1800,31 +1877,26 @@ async function startServer() {
 
         if (msg.type === 'sync:pull') {
           const since = Number(msg.since || 0);
-          if (since > 0) {
-            const deltaEntries: Record<string, SyncEntry> = {};
-            for (const [key, entry] of Object.entries(syncState.entries)) {
-              if (entry.revision > since) {
-                deltaEntries[key] = entry;
+          const pullEntries: Record<string, SyncEntry> = {};
+          const pullDeferredKeys: string[] = [];
+          for (const [key, entry] of Object.entries(syncState.entries)) {
+            if (since <= 0 || entry.revision > since) {
+              if (entry.value && entry.value.length > FAST_ENTRY_MAX_BYTES) {
+                pullDeferredKeys.push(key);
+              } else {
+                pullEntries[key] = entry;
               }
             }
-            ws.send(
-              JSON.stringify({
-                type: 'sync:state',
-                revision: syncState.revision,
-                entries: deltaEntries,
-                activeClients: getActiveClientCount(),
-              })
-            );
-          } else {
-            ws.send(
-              JSON.stringify({
-                type: 'sync:state',
-                revision: syncState.revision,
-                entries: syncState.entries,
-                activeClients: getActiveClientCount(),
-              })
-            );
           }
+          ws.send(
+            JSON.stringify({
+              type: 'sync:state',
+              revision: syncState.revision,
+              entries: pullEntries,
+              deferredKeys: pullDeferredKeys,
+              activeClients: getActiveClientCount(),
+            })
+          );
           return;
         }
 

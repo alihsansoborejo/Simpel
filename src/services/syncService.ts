@@ -73,6 +73,7 @@ class RealtimeSyncService {
     { batch: Array<{ key: string; value: string | null; updatedAt: string }>; timer: number }
   >();
   private inMemoryFallback = new Map<string, string>();
+  private keyUpdatedAt = new Map<string, string>();
   private flushTimer: number | null = null;
   private reconnectTimer: number | null = null;
   private reconnectAttempts = 0;
@@ -82,11 +83,78 @@ class RealtimeSyncService {
   private heartbeatTimer: number | null = null;
   private deltaPollTimer: number | null = null;
   private lastKnownValues = new Map<string, string | null>();
+  private cloudPullInFlight = false;
+  private deferredKeysInFlight = new Set<string>();
 
   private statusListeners = new Set<(snap: SyncStatusSnapshot) => void>();
 
   constructor() {
     this.setupBroadcastChannel();
+  }
+
+  private sanitizeUsersJsonForCloud(rawJson: string): string {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (!Array.isArray(parsed)) return rawJson;
+      const sanitized = parsed.map((u: any) => {
+        if (!u || typeof u !== 'object') return u;
+        return {
+          ...u,
+          password: '__CLOUD_VERIFIED__',
+        };
+      });
+      return JSON.stringify(sanitized);
+    } catch {
+      return rawJson;
+    }
+  }
+
+  private mergeCloudUsersJsonWithLocal(cloudJson: string): string {
+    try {
+      const remoteUsers = JSON.parse(cloudJson);
+      if (!Array.isArray(remoteUsers)) return cloudJson;
+
+      const localRaw =
+        nativeGetItem.call(window.localStorage, 'simpel_users_cache_v2') ??
+        this.inMemoryFallback.get('simpel_users_cache_v2');
+      const localMap = new Map<string, any>();
+      if (localRaw) {
+        try {
+          const parsedLocal = JSON.parse(localRaw);
+          if (Array.isArray(parsedLocal)) {
+            for (const lu of parsedLocal) {
+              if (lu?.email) {
+                localMap.set(String(lu.email).trim().toLowerCase(), lu);
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const merged = remoteUsers.map((ru: any) => {
+        if (!ru || typeof ru !== 'object') return ru;
+        const email = String(ru.email || '').trim().toLowerCase();
+        const existingLocal = localMap.get(email);
+        const remotePassword = ru.password;
+        const hasRealLocalPassword =
+          existingLocal?.password &&
+          existingLocal.password !== '__CLOUD_VERIFIED__' &&
+          existingLocal.password !== '••••••••';
+        const isPlaceholderRemote =
+          !remotePassword || remotePassword === '__CLOUD_VERIFIED__' || remotePassword === '••••••••';
+
+        if (isPlaceholderRemote && hasRealLocalPassword) {
+          return { ...ru, password: existingLocal.password };
+        }
+        return ru;
+      });
+
+      return JSON.stringify(merged);
+    } catch {
+      return cloudJson;
+    }
   }
 
   private snapshotLocalValues(): void {
@@ -216,6 +284,7 @@ class RealtimeSyncService {
 
   private enqueueMutation(key: string, value: string | null): void {
     const updatedAt = new Date().toISOString();
+    this.keyUpdatedAt.set(key, updatedAt);
     this.pendingMutations.set(key, { value, updatedAt });
     this.emitStatus();
 
@@ -276,6 +345,64 @@ class RealtimeSyncService {
     }
   }
 
+  private async pushMutationsToSupabaseCloud(
+    batch: Array<{ key: string; value: string | null; updatedAt: string }>
+  ): Promise<void> {
+    if (!isSupabaseConfigured || batch.length === 0) return;
+
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (!sessionData?.session?.user) return;
+
+      // 1. Jika simpel_users_cache_v2 ikut berubah, sinkronkan hash kredensial login via RPC admin
+      const usersMut = batch.find((m) => m.key === 'simpel_users_cache_v2' && m.value);
+      if (usersMut?.value) {
+        try {
+          const parsedUsers = JSON.parse(usersMut.value);
+          if (Array.isArray(parsedUsers)) {
+            await supabase.rpc('sync_app_user_credentials', {
+              p_users: parsedUsers,
+              p_prune: true,
+            });
+          }
+        } catch {
+          // RPC mungkin belum dibuat di Supabase SQL Editor; abaikan dengan aman
+        }
+      }
+
+      // 2. Siapkan payload app_sync_state (hapus plain-text password dari simpel_users_cache_v2)
+      const smallRows: Array<{ key: string; value: string | null; revision: number; updated_at: string }> = [];
+      const largeRows: Array<{ key: string; value: string | null; revision: number; updated_at: string }> = [];
+
+      for (const mut of batch) {
+        let safeValue = mut.value;
+        if (mut.key === 'simpel_users_cache_v2' && safeValue) {
+          safeValue = this.sanitizeUsersJsonForCloud(safeValue);
+        }
+        const row = {
+          key: mut.key,
+          value: safeValue,
+          revision: Math.max(1, this.lastRevision),
+          updated_at: mut.updatedAt || new Date().toISOString(),
+        };
+        if (safeValue && safeValue.length > 250_000) {
+          largeRows.push(row);
+        } else {
+          smallRows.push(row);
+        }
+      }
+
+      if (smallRows.length > 0) {
+        await supabase.from('app_sync_state').upsert(smallRows, { onConflict: 'key' });
+      }
+      for (const lr of largeRows) {
+        await supabase.from('app_sync_state').upsert(lr, { onConflict: 'key' });
+      }
+    } catch {
+      // Abaikan diam-diam bila tabel app_sync_state belum dijalankan atau peran bukan admin
+    }
+  }
+
   public async flushMutations(): Promise<void> {
     if (this.pendingMutations.size === 0) return;
 
@@ -294,6 +421,9 @@ class RealtimeSyncService {
       clientId: this.clientId,
       mutations: batch,
     });
+
+    // Jalankan backup cloud non-blocking agar tidak menghambat real-time lokal
+    void this.pushMutationsToSupabaseCloud(batch);
 
     // Untuk payload <= 128 KB gunakan WebSocket + ACK watchdog; payload besar langsung HTTP POST agar bebas limit frame proxy
     if (this.ws && this.ws.readyState === WebSocket.OPEN && wsPayload.length <= WS_MAX_FRAME_BYTES) {
@@ -361,7 +491,15 @@ class RealtimeSyncService {
         // Skip overwriting key if user has an un-flushed newer local mutation for this exact key
         if (this.pendingMutations.has(key)) continue;
 
-        const remoteValue = entry?.value ?? null;
+        if (entry?.updatedAt) {
+          this.keyUpdatedAt.set(key, entry.updatedAt);
+        }
+
+        let remoteValue = entry?.value ?? null;
+        if (key === 'simpel_users_cache_v2' && remoteValue) {
+          remoteValue = this.mergeCloudUsersJsonWithLocal(remoteValue);
+        }
+
         const currentLocal = nativeGetItem.call(window.localStorage, key) ?? this.inMemoryFallback.get(key) ?? null;
 
         if (remoteValue === null) {
@@ -413,15 +551,196 @@ class RealtimeSyncService {
     return changedKeys;
   }
 
-  public async pullFromServer(sinceRevision = 0): Promise<void> {
+  private async pullDeferredKeys(keys: string[]): Promise<void> {
+    if (!Array.isArray(keys) || keys.length === 0) return;
+
+    for (const key of keys) {
+      if (!isSyncedKey(key) || this.deferredKeysInFlight.has(key)) continue;
+      this.deferredKeysInFlight.add(key);
+      try {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 30000);
+        const res = await fetch(`/api/sync/key/${encodeURIComponent(key)}?_t=${Date.now()}`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        window.clearTimeout(timeout);
+        if (!res.ok) continue;
+        const json = await res.json();
+        if (json?.entry) {
+          this.applyRemoteEntries({ [key]: json.entry }, json.revision);
+        }
+      } catch (err) {
+        console.warn(`[Sync] Deferred key ${key} fetch retried later:`, err);
+      } finally {
+        this.deferredKeysInFlight.delete(key);
+      }
+    }
+  }
+
+  public async pullFromSupabaseCloud(options?: { fastOnly?: boolean; hydrateLocalServer?: boolean }): Promise<boolean> {
+    if (!isSupabaseConfigured || this.cloudPullInFlight) return false;
+    this.cloudPullInFlight = true;
+
+    try {
+      let query = supabase
+        .from('app_sync_state')
+        .select('key, value, revision, updated_at');
+
+      if (options?.fastOnly) {
+        query = query.neq('key', 'simpel_settings');
+      }
+
+      const { data, error } = await query;
+      if (error || !Array.isArray(data) || data.length === 0) {
+        return false;
+      }
+
+      const entriesToApply: Record<string, { value: string | null; updatedAt?: string; revision?: number }> = {};
+      const mutationsForLocalServer: Array<{ key: string; value: string | null; updatedAt: string }> = [];
+
+      for (const row of data as Array<{ key: string; value: string | null; revision: number; updated_at: string }>) {
+        if (!isSyncedKey(row.key)) continue;
+        const localCurrent =
+          nativeGetItem.call(window.localStorage, row.key) ?? this.inMemoryFallback.get(row.key) ?? null;
+        const localUpdatedAt = this.keyUpdatedAt.get(row.key);
+
+        let shouldApply = false;
+        if (localCurrent === null) {
+          shouldApply = true;
+        } else if (row.key === 'simpel_users_cache_v2') {
+          try {
+            const localUsers = JSON.parse(localCurrent);
+            const cloudUsers = row.value ? JSON.parse(row.value) : [];
+            if (Array.isArray(cloudUsers) && cloudUsers.length > (Array.isArray(localUsers) ? localUsers.length : 0)) {
+              shouldApply = true;
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        if (!shouldApply && row.updated_at && (!localUpdatedAt || Date.parse(row.updated_at) > Date.parse(localUpdatedAt))) {
+          shouldApply = true;
+        }
+
+        if (shouldApply) {
+          entriesToApply[row.key] = {
+            value: row.value,
+            updatedAt: row.updated_at,
+            revision: row.revision,
+          };
+          if (options?.hydrateLocalServer && row.value !== null) {
+            const hydratedValue =
+              row.key === 'simpel_users_cache_v2' ? this.mergeCloudUsersJsonWithLocal(row.value) : row.value;
+            mutationsForLocalServer.push({
+              key: row.key,
+              value: hydratedValue,
+              updatedAt: row.updated_at || new Date().toISOString(),
+            });
+          }
+        }
+      }
+
+      const keysCount = Object.keys(entriesToApply).length;
+      if (keysCount > 0) {
+        this.applyRemoteEntries(entriesToApply);
+        if (mutationsForLocalServer.length > 0) {
+          void this.sendBatchViaHttp(mutationsForLocalServer);
+        }
+      }
+
+      if (options?.fastOnly) {
+        // Tarik simpel_settings (logo besar) secara latar belakang
+        void supabase
+          .from('app_sync_state')
+          .select('key, value, revision, updated_at')
+          .eq('key', 'simpel_settings')
+          .maybeSingle()
+          .then(({ data: settingsRow }) => {
+            if (settingsRow && (settingsRow as any).value) {
+              const sr = settingsRow as { key: string; value: string; revision: number; updated_at: string };
+              const localTs = this.keyUpdatedAt.get('simpel_settings');
+              const hasLocal =
+                nativeGetItem.call(window.localStorage, 'simpel_settings') ??
+                this.inMemoryFallback.get('simpel_settings');
+              if (!hasLocal || !localTs || Date.parse(sr.updated_at) > Date.parse(localTs)) {
+                this.applyRemoteEntries({
+                  simpel_settings: {
+                    value: sr.value,
+                    updatedAt: sr.updated_at,
+                    revision: sr.revision,
+                  },
+                });
+              }
+            }
+          });
+      }
+
+      return keysCount > 0;
+    } catch {
+      return false;
+    } finally {
+      this.cloudPullInFlight = false;
+    }
+  }
+
+  public async syncAllLocalToCloud(): Promise<void> {
+    if (!isSupabaseConfigured || typeof window === 'undefined') return;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (!sessionData?.session?.user) return;
+
+      const collected = new Map<string, string>();
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        if (key && isSyncedKey(key)) {
+          const val = nativeGetItem.call(window.localStorage, key);
+          if (val !== null) collected.set(key, val);
+        }
+      }
+      this.inMemoryFallback.forEach((val, key) => {
+        if (isSyncedKey(key) && val !== null) {
+          collected.set(key, val);
+        }
+      });
+
+      const batch: Array<{ key: string; value: string | null; updatedAt: string }> = [];
+      const now = new Date().toISOString();
+      collected.forEach((val, key) => {
+        batch.push({
+          key,
+          value: val,
+          updatedAt: this.keyUpdatedAt.get(key) || now,
+        });
+      });
+
+      if (batch.length > 0) {
+        await this.pushMutationsToSupabaseCloud(batch);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  public async pullFromServer(sinceRevision = 0, options?: { priorityFast?: boolean }): Promise<void> {
     if (this.isPulling) return;
     this.isPulling = true;
+
+    const useFast = options?.priorityFast ?? (sinceRevision === 0);
 
     try {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 15000);
-      const url = sinceRevision > 0 ? `/api/sync/state?since=${sinceRevision}&_t=${Date.now()}` : `/api/sync/state?_t=${Date.now()}`;
-      const res = await fetch(url, { cache: 'no-store', signal: controller.signal });
+      const params = new URLSearchParams();
+      if (sinceRevision > 0) params.set('since', String(sinceRevision));
+      if (useFast) params.set('priority', 'fast');
+      params.set('_t', String(Date.now()));
+
+      const res = await fetch(`/api/sync/state?${params.toString()}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
       window.clearTimeout(timeout);
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -432,12 +751,33 @@ class RealtimeSyncService {
       }
 
       const serverEntries = data.entries || {};
+      const deferredKeys: string[] = Array.isArray(data.deferredKeys) ? data.deferredKeys : [];
       const serverRevision = typeof data.revision === 'number' ? data.revision : 0;
 
-      if (serverRevision > 0 || Object.keys(serverEntries).length > 0) {
-        this.applyRemoteEntries(serverEntries, serverRevision);
+      if (serverRevision > 0 || Object.keys(serverEntries).length > 0 || deferredKeys.length > 0) {
+        if (Object.keys(serverEntries).length > 0) {
+          this.applyRemoteEntries(serverEntries, serverRevision);
+        } else if (serverRevision > this.lastRevision) {
+          this.lastRevision = serverRevision;
+        }
+
+        if (deferredKeys.length > 0) {
+          void this.pullDeferredKeys(deferredKeys);
+        }
+
+        // Pada startup awal, jika Supabase aktif dan server lokal baru sedikit akun, cek cloud app_sync_state
+        if (sinceRevision === 0 && isSupabaseConfigured) {
+          void this.pullFromSupabaseCloud({ fastOnly: true, hydrateLocalServer: true });
+        }
       } else if (sinceRevision === 0) {
-        await this.seedServerWithInitialLocalState();
+        // Server baru kosong (revision === 0): prioritaskan tarik dari Supabase cloud dulu sebelum seed lokal
+        const restoredFromCloud = isSupabaseConfigured
+          ? await this.pullFromSupabaseCloud({ fastOnly: true, hydrateLocalServer: true })
+          : false;
+
+        if (!restoredFromCloud) {
+          await this.seedServerWithInitialLocalState();
+        }
       }
 
       this.httpConnected = true;
@@ -445,6 +785,10 @@ class RealtimeSyncService {
       this.updateConnectionStatus();
     } catch (err) {
       this.httpConnected = false;
+      // Fallback ke Supabase cloud jika endpoint Express sedang lambat / restart
+      if (sinceRevision === 0 && isSupabaseConfigured) {
+        await this.pullFromSupabaseCloud({ fastOnly: true });
+      }
       this.updateConnectionStatus();
       console.warn('[Sync] Pull skipped/retried:', err);
     } finally {
@@ -452,7 +796,37 @@ class RealtimeSyncService {
     }
   }
 
+  private hasMeaningfulLocalDataForSeeding(): boolean {
+    try {
+      const usersRaw = nativeGetItem.call(window.localStorage, 'simpel_users_cache_v2');
+      if (usersRaw) {
+        const users = JSON.parse(usersRaw);
+        if (Array.isArray(users) && users.length > 1) return true;
+      }
+      const teachersRaw = nativeGetItem.call(window.localStorage, 'simpel_teachers');
+      if (teachersRaw) {
+        const teachers = JSON.parse(teachersRaw);
+        if (Array.isArray(teachers) && teachers.length > 0) return true;
+      }
+      const studentsRaw = nativeGetItem.call(window.localStorage, 'simpel_students');
+      if (studentsRaw) {
+        const students = JSON.parse(studentsRaw);
+        if (Array.isArray(students) && students.length > 0) return true;
+      }
+      const settingsRaw =
+        nativeGetItem.call(window.localStorage, 'simpel_settings') ??
+        this.inMemoryFallback.get('simpel_settings');
+      if (settingsRaw && settingsRaw.includes('data:image/')) return true;
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
   private async seedServerWithInitialLocalState(): Promise<void> {
+    if (!this.hasMeaningfulLocalDataForSeeding()) {
+      return;
+    }
     const mutations: Array<{ key: string; value: string; updatedAt: string }> = [];
     const now = new Date().toISOString();
     try {
@@ -465,6 +839,11 @@ class RealtimeSyncService {
           }
         }
       }
+      this.inMemoryFallback.forEach((val, key) => {
+        if (isSyncedKey(key) && val !== null) {
+          mutations.push({ key, value: val, updatedAt: now });
+        }
+      });
       if (mutations.length > 0) {
         const res = await fetch('/api/sync/batch', {
           method: 'POST',
@@ -526,6 +905,9 @@ class RealtimeSyncService {
             const entries = msg.entries || {};
             if (msg.revision > 0 || Object.keys(entries).length > 0) {
               this.applyRemoteEntries(entries, msg.revision);
+            }
+            if (Array.isArray(msg.deferredKeys) && msg.deferredKeys.length > 0) {
+              void this.pullDeferredKeys(msg.deferredKeys);
             }
             this.status = 'connected';
             this.emitStatus();
@@ -631,7 +1013,7 @@ class RealtimeSyncService {
         if (this.pendingMutations.size > 0) {
           await this.flushMutations();
         }
-        await this.pullFromServer(this.lastRevision);
+        await this.pullFromServer(this.lastRevision, { priorityFast: false });
       }
       const nextInterval = this.ws?.readyState === WebSocket.OPEN ? 5000 : 2500;
       this.deltaPollTimer = window.setTimeout(() => {
@@ -660,6 +1042,9 @@ class RealtimeSyncService {
       supabase
         .channel('simpel-global-db-sync')
         .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
+          if (payload.table === 'app_sync_state') {
+            void this.pullFromSupabaseCloud({ fastOnly: true, hydrateLocalServer: true });
+          }
           window.dispatchEvent(
             new CustomEvent('simpel:remote-sync', {
               detail: { keys: ['*'], table: payload.table },
@@ -678,14 +1063,19 @@ class RealtimeSyncService {
     this.bootstrapPromise = (async () => {
       if (typeof window === 'undefined') return;
 
-      // 1. Pull authoritative server state first (does not abort prematurely on large payloads)
-      await this.pullFromServer(0);
+      // 1. Tarik data cepat (~22KB: akun, guru, siswa, kelas, dll) tanpa terblokir oleh logo/settings besar
+      await this.pullFromServer(0, { priorityFast: true });
 
       // 2. Snapshot synced baseline & install transparent localStorage interceptor
       this.snapshotLocalValues();
       this.installStorageInterceptor();
 
-      // 3. Establish WebSocket + SSE fallback + adaptive delta check + lifecycle hooks
+      // 3. Jika Admin sudah punya sesi Supabase Auth aktif, sinkronkan state lokal ke cloud di latar belakang
+      if (isSupabaseConfigured) {
+        void this.syncAllLocalToCloud();
+      }
+
+      // 4. Establish WebSocket + SSE fallback + adaptive delta check + lifecycle hooks
       this.connectWebSocket();
       this.setupSSEFallback();
       this.startAdaptiveDeltaCheck();
@@ -697,7 +1087,7 @@ class RealtimeSyncService {
         this.updateConnectionStatus();
         void this.flushMutations();
         this.connectWebSocket();
-        void this.pullFromServer(this.lastRevision);
+        void this.pullFromServer(this.lastRevision, { priorityFast: false });
       });
 
       window.addEventListener('offline', () => {
@@ -710,7 +1100,7 @@ class RealtimeSyncService {
           if ((!this.ws || this.ws.readyState !== WebSocket.OPEN) && this.wsConsecutiveFailures < this.maxWsFailures) {
             this.connectWebSocket();
           }
-          void this.pullFromServer(this.lastRevision);
+          void this.pullFromServer(this.lastRevision, { priorityFast: false });
         }
       });
 
@@ -730,7 +1120,11 @@ class RealtimeSyncService {
       this.connectWebSocket();
     }
     await this.flushMutations();
-    await this.pullFromServer(0);
+    await this.pullFromServer(0, { priorityFast: false });
+    if (isSupabaseConfigured) {
+      await this.syncAllLocalToCloud();
+      await this.pullFromSupabaseCloud({ fastOnly: false, hydrateLocalServer: true });
+    }
     window.dispatchEvent(new CustomEvent('simpel:remote-sync', { detail: { keys: ['*'], manual: true } }));
     window.dispatchEvent(new CustomEvent('simpel:remote-file-sync', { detail: { manual: true } }));
     this.updateConnectionStatus();

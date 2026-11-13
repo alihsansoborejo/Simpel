@@ -1,13 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { assessmentService, LearningAnalysisResult } from '../../services/assessmentService';
+import { academicService } from '../../services/academicService';
 import { Assessment } from '../../types/database.types';
+import { useAuth } from '../../context/AuthContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
-  TrendingUp,
-  Award,
-  Users,
-  CheckCircle,
-  AlertCircle,
   BarChart2,
   Sparkles,
   ArrowUpRight,
@@ -15,33 +13,64 @@ import {
 } from 'lucide-react';
 
 export const LearningAnalysisPage: React.FC = () => {
+  const { user, activeRole } = useAuth();
+  const { selectedAssignmentId, selectedSubjectId, selectedClassId } = useWorkspace();
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [selectedAsmId, setSelectedAsmId] = useState<string>('');
   const [analysis, setAnalysis] = useState<LearningAnalysisResult | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const asms = await assessmentService.getAssessments();
-      setAssessments(asms);
-      if (asms.length > 0) {
-        setSelectedAsmId(asms[0].id);
-        const result = await assessmentService.getLearningAnalysis(asms[0].id, Number(asms[0].kktp));
+      const [asms, asgs, teacher] = await Promise.all([
+        assessmentService.getAssessments(),
+        academicService.getTeachingAssignments(),
+        academicService.resolveTeacherForUser(user),
+      ]);
+
+      const scopedAsgs =
+        activeRole === 'guru'
+          ? teacher
+            ? asgs.filter((a) => a.teacher_id === teacher.id)
+            : []
+          : asgs;
+      const scopedIds = new Set(scopedAsgs.map((a) => a.id));
+      const scopedAsms =
+        activeRole === 'guru' ? asms.filter((a) => scopedIds.has(a.assignment_id)) : asms;
+
+      setAssessments(scopedAsms);
+      if (scopedAsms.length > 0) {
+        const wsAsm =
+          (selectedAssignmentId && scopedAsms.find((a) => a.assignment_id === selectedAssignmentId)) ||
+          scopedAsms.find((a) => {
+            const linked = a.assignment || scopedAsgs.find((asg) => asg.id === a.assignment_id);
+            return (
+              linked &&
+              (!selectedSubjectId || linked.subject_id === selectedSubjectId) &&
+              (!selectedClassId || linked.class_id === selectedClassId)
+            );
+          });
+        const targetAsm = wsAsm || scopedAsms.find((a) => a.id === selectedAsmId) || scopedAsms[0];
+        setSelectedAsmId(targetAsm.id);
+        const result = await assessmentService.getLearningAnalysis(targetAsm.id, Number(targetAsm.kktp));
         setAnalysis(result);
+      } else {
+        setSelectedAsmId('');
+        setAnalysis(null);
       }
     } catch (err) {
       console.error('Gagal menganalisis hasil belajar:', err);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [activeRole, user?.id, user?.teacherId, selectedAssignmentId, selectedSubjectId, selectedClassId]);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    void loadData();
+  }, [loadData]);
 
-  useRealtimeSync(['simpel_assessments', 'simpel_grades', 'simpel_students'], () => {
+  useRealtimeSync(['simpel_assessments', 'simpel_grades', 'simpel_students', 'simpel_assignments'], () => {
     void loadData();
   });
 
@@ -74,19 +103,28 @@ export const LearningAnalysisPage: React.FC = () => {
           <select
             value={selectedAsmId}
             onChange={(e) => handleSelectAsm(e.target.value)}
-            className="text-xs font-bold text-slate-900 bg-white border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-emerald-600 shadow-xs"
+            disabled={assessments.length === 0}
+            className="text-xs font-bold text-slate-900 bg-white border border-slate-200 rounded-lg px-3 py-1.5 focus:outline-emerald-600 shadow-xs disabled:bg-slate-100"
           >
-            {assessments.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.title} (KKTP: {a.kktp})
-              </option>
-            ))}
+            {assessments.length === 0 ? (
+              <option value="">Belum ada instrumen asesmen</option>
+            ) : (
+              assessments.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.title} (KKTP: {a.kktp})
+                </option>
+              ))
+            )}
           </select>
         </div>
       </div>
 
-      {isLoading || !analysis ? (
+      {isLoading ? (
         <div className="p-12 text-center text-slate-400 text-xs">Memproses statistik nilai siswa...</div>
+      ) : !analysis ? (
+        <div className="p-10 text-center bg-white rounded-xl border border-slate-200 text-slate-500 text-xs">
+          Belum ada data asesmen untuk mata pelajaran yang Anda ampu. Buat instrumen asesmen di tab <strong>Daftar Nilai Siswa</strong> terlebih dahulu.
+        </div>
       ) : (
         <>
           {/* Kartu Ringkasan Metrik Riil */}

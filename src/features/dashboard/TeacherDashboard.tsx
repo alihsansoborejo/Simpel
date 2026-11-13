@@ -1,32 +1,23 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { fetchTeacherDashboardData, TeacherDashboardData } from '../../services/dashboardService';
-import { StatCard } from '../../components/ui/StatCard';
+import { useWorkspace } from '../../context/WorkspaceContext';
+import { useAppSettings } from '../../context/AppSettingsContext';
+import {
+  fetchTeacherDashboardData,
+  TeacherDashboardData,
+} from '../../services/dashboardService';
+import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   CalendarCheck,
   ClipboardList,
   Sparkles,
   Award,
-  CheckCircle2,
   FolderSync,
-  AlertTriangle,
   ArrowRight,
   BookOpen,
-  FileText,
   FileSpreadsheet,
-  Download,
-  Printer,
-  ChevronRight,
-  ChevronDown,
-  Layers,
-  HelpCircle,
-  ExternalLink,
-  Search,
-  Check,
-  Info,
-  Heart,
-  TrendingUp,
+  AlertCircle,
 } from 'lucide-react';
 
 interface TeacherDashboardProps {
@@ -35,19 +26,42 @@ interface TeacherDashboardProps {
 
 export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }) => {
   const { user } = useAuth();
+  const { settings } = useAppSettings();
+  const {
+    selectedSubjectId,
+    selectedAssignmentId,
+    setWorkspaceSelection,
+  } = useWorkspace();
   const [data, setData] = useState<TeacherDashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedSubjectTab, setSelectedSubjectTab] = useState<'bi' | 'ipas'>('bi');
-  const [activeModalItem, setActiveModalItem] = useState<{
-    title: string;
-    type: 'cp' | 'tp' | 'atp' | 'kisi' | 'soal' | 'nilai';
-    content: React.ReactNode;
-  } | null>(null);
+  const [activeSubjectId, setActiveSubjectId] = useState<string>('');
+  const [activeAssignmentId, setActiveAssignmentId] = useState<string>('');
 
   const loadData = async () => {
     try {
-      const res = await fetchTeacherDashboardData(user?.teacherId);
+      const res = await fetchTeacherDashboardData(user?.teacherId, user);
       setData(res);
+
+      if (res.subjectsSummary.length > 0) {
+        const preferredSubject =
+          res.subjectsSummary.find((s) => s.subjectId === selectedSubjectId) ||
+          res.subjectsSummary.find((s) => s.subjectId === activeSubjectId) ||
+          res.subjectsSummary[0];
+
+        setActiveSubjectId(preferredSubject.subjectId);
+
+        const preferredSlot =
+          preferredSubject.classes.find((c) => c.assignmentId === selectedAssignmentId) ||
+          preferredSubject.classes.find((c) => c.assignmentId === activeAssignmentId) ||
+          preferredSubject.classes[0];
+
+        if (preferredSlot) {
+          setActiveAssignmentId(preferredSlot.assignmentId);
+        }
+      } else {
+        setActiveSubjectId('');
+        setActiveAssignmentId('');
+      }
     } catch (err) {
       console.error('Error loading teacher dashboard:', err);
     } finally {
@@ -59,9 +73,60 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
     void loadData();
   }, [user]);
 
-  useRealtimeSync('*', () => {
-    void loadData();
-  });
+  useRealtimeSync(
+    [
+      'simpel_assignments',
+      'simpel_teachers',
+      'simpel_classes',
+      'simpel_subjects',
+      'simpel_teaching_journals',
+      'simpel_supervision_records',
+      'simpel_curriculum_documents',
+      'simpel_settings',
+      'simpel_users_cache_v2',
+    ],
+    () => {
+      void loadData();
+    }
+  );
+
+  const selectedSubjectGroup = useMemo(() => {
+    if (!data || data.subjectsSummary.length === 0) return null;
+    return (
+      data.subjectsSummary.find((s) => s.subjectId === activeSubjectId) ||
+      data.subjectsSummary[0]
+    );
+  }, [data, activeSubjectId]);
+
+  const selectedSlot = useMemo(() => {
+    if (!selectedSubjectGroup || selectedSubjectGroup.classes.length === 0) return null;
+    return (
+      selectedSubjectGroup.classes.find((c) => c.assignmentId === activeAssignmentId) ||
+      selectedSubjectGroup.classes[0]
+    );
+  }, [selectedSubjectGroup, activeAssignmentId]);
+
+  const scopeConfigs = useMemo(() => {
+    if (!selectedSlot) return [];
+    const semesterArg = data?.semesterName === 'Genap' ? 'Genap' : 'Ganjil';
+    return curriculumWorkspaceService.getLingkupMateriList(
+      selectedSlot.subjectId,
+      selectedSlot.classLevel,
+      semesterArg
+    );
+  }, [selectedSlot, data?.semesterName]);
+
+  const navigateWithWorkspace = (view: string) => {
+    if (selectedSlot) {
+      setWorkspaceSelection({
+        subjectId: selectedSlot.subjectId,
+        classId: selectedSlot.classId,
+        classLevel: selectedSlot.classLevel,
+        assignmentId: selectedSlot.assignmentId,
+      });
+    }
+    onNavigate(view);
+  };
 
   if (isLoading || !data) {
     return (
@@ -76,62 +141,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
     );
   }
 
-  // Data Perangkat Bahasa Indonesia
-  const biCurriculum = {
-    cp: [
-      {
-        element: 'Menyimak',
-        desc: 'Peserta didik mampu memahami ide pokok dan pendukung pada teks audio, teks aural (teks yang dibacakan), dan teks audiovisual.',
-      },
-      {
-        element: 'Membaca & Memirsa',
-        desc: 'Peserta didik mampu memahami pesan dan informasi tentang kehidupan sehari-hari, teks narasi, dan puisi anak dalam bentuk cetak atau elektronik.',
-      },
-      {
-        element: 'Berbicara & Mempresentasikan',
-        desc: 'Peserta didik mampu melafalkan kata secara fasih dan menyajikan ungkapan santun menggunakan Kurikulum Berbasis Cinta dalam interaksi antarteman.',
-      },
-      {
-        element: 'Menulis',
-        desc: 'Peserta didik mampu menulis teks narasi dan deskripsi dengan tulisan tegak bersambung dan kaidah bahasa Indonesia yang baik.',
-      },
-    ],
-    tp: [
-      { code: 'TP 4.1', text: 'Mengidentifikasi ide pokok dari teks cerita rakyat nusantara secara teliti.', semester: 'Ganjil' },
-      { code: 'TP 4.2', text: 'Menjelaskan arti kata-kata baru menggunakan Kamus Besar Bahasa Indonesia (KBBI).', semester: 'Ganjil' },
-      { code: 'TP 4.3', text: 'Menuliskan paragraf deskripsi sederhana tentang lingkungan madrasah dengan kosakata baku.', semester: 'Ganjil' },
-      { code: 'TP 4.4', text: 'Mempresentasikan hasil pengamatan tanaman di madrasah dengan penuh percaya diri.', semester: 'Ganjil' },
-      { code: 'TP 4.5', text: 'Membedakan kalimat transitif dan intransitif dalam teks bacaan bertema kasih sayang.', semester: 'Genap' },
-    ],
-    atp: [
-      { stage: 'Tahap 1', bab: 'Bab 1: Sudah Besar', focus: 'Menyimak cerita, kalimat transitif/intransitif, KBBI', jp: '18 JP' },
-      { stage: 'Tahap 2', bab: 'Bab 2: Di Bawah Atap', focus: 'Tugas di rumah, kata hubung, teks deskripsi keluarga', jp: '18 JP' },
-      { stage: 'Tahap 3', bab: 'Bab 3: Lihat Sekitar', focus: 'Denah rute jalan madrasah, kalimat persuasif, rambu lalu lintas', jp: '18 JP' },
-      { stage: 'Tahap 4', bab: 'Bab 4: Meliuk dan Menerjang', focus: 'Teks wawancara sederhana, ide pokok, gaya bahasa', jp: '18 JP' },
-    ],
-    evaluation: {
-      kisi: [
-        { code: 'KISI-01', topik: 'Kalimat Transitif & Intransitif', bentuk: 'Pilihan Ganda & Uraian', level: 'L2 (Aplikasi)' },
-        { code: 'KISI-02', topik: 'Kosakata Baru & Arti Kata KBBI', bentuk: 'Menjodohkan & Isian', level: 'L1 (Pemahaman)' },
-        { code: 'KISI-03', topik: 'Paragraf Deskripsi Madrasah', bentuk: 'Unjuk Kerja / Praktik Tulis', level: 'L3 (Penalaran/HOTS)' },
-      ],
-      soal: [
-        { nomor: 1, soal: 'Perhatikan kalimat: "Farhan membaca buku cerita di perpustakaan madrasah." Kalimat tersebut termasuk jenis kalimat...', tipe: 'PG' },
-        { nomor: 2, soal: 'Jelaskan perbedaan kalimat transitif dan kalimat intransitif beserta contohnya masing-masing!', tipe: 'Uraian' },
-      ],
-      gradesSummary: [
-        { name: 'Ahmad Faiz Al-Habsyi', formatif: 88, sts: 90, sas: 87, akhir: 88, status: 'Tuntas' },
-        { name: 'Aisyah Putri Rahmawati', formatif: 94, sts: 95, sas: 93, akhir: 94, status: 'Tuntas' },
-        { name: 'Bilal Pratama Soborejo', formatif: 72, sts: 70, sas: 74, akhir: 72, status: 'Perlu Remedial' },
-      ],
-    },
-  };
-
   return (
     <div className="space-y-6">
-      {/* =========================================================================
-          BANNER UTAMA: DASHBOR GURU
-          ========================================================================= */}
+      {/* Banner Utama */}
       <div className="p-5 rounded-2xl bg-gradient-to-r from-emerald-950 via-emerald-900 to-emerald-800 text-white shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
@@ -139,21 +151,21 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
               DASHBOR GURU
             </span>
             <span className="text-xs text-emerald-300 font-medium">
-              MI Ma’arif Al Ihsan Soborejo
+              {settings?.school_name || 'MI Ma’arif Al Ihsan Soborejo'}
             </span>
           </div>
           <h2 className="text-xl font-extrabold mt-2 tracking-tight">
             Selamat Bertugas, {data.teacherName}
           </h2>
           <p className="text-xs text-emerald-200 mt-0.5">
-            NIP: {data.nip} · Spesialisasi: {data.specialization} · TP 2026/2027 Semester Ganjil
+            NIP: {data.nip} · Bidang: {data.specialization} · TP {data.academicYearName} Semester {data.semesterName}
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
           {user?.roles?.includes('wali_kelas') ? (
             <button
-              onClick={() => onNavigate('presensi')}
+              onClick={() => navigateWithWorkspace('presensi')}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-700/80 hover:bg-emerald-600 transition-colors border border-emerald-500/30"
             >
               <CalendarCheck className="w-4 h-4 text-amber-300" />
@@ -161,7 +173,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
             </button>
           ) : (
             <button
-              onClick={() => onNavigate('jurnal-mengajar')}
+              onClick={() => navigateWithWorkspace('jurnal-mengajar')}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-700/80 hover:bg-emerald-600 transition-colors border border-emerald-500/30"
             >
               <ClipboardList className="w-4 h-4 text-amber-300" />
@@ -169,7 +181,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
             </button>
           )}
           <button
-            onClick={() => onNavigate('asisten-ai')}
+            onClick={() => navigateWithWorkspace('asisten-ai')}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-900 bg-amber-300 hover:bg-amber-400 transition-colors shadow-xs"
           >
             <Sparkles className="w-4 h-4 text-emerald-950" />
@@ -178,9 +190,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
         </div>
       </div>
 
-      {/* =========================================================================
-          1. PRESENSI / JURNAL KBM STRIP
-          ========================================================================= */}
+      {/* Ringkasan Cepat Operasional */}
       <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-xs">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start gap-3">
@@ -192,20 +202,20 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
               )}
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-bold text-sm text-slate-900">
                   {user?.roles?.includes('wali_kelas')
                     ? 'Presensi Siswa Rombel Binaan'
                     : 'Jurnal Mengajar & Presensi KBM'}
                 </h3>
                 <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-100 text-emerald-800">
-                  {user?.roles?.includes('wali_kelas') ? 'Wali Kelas' : 'Guru Pengampu'}
+                  {data.totalSubjectsTaught} Mapel · {data.assignedClassesCount} Rombel Diampu
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
                 {user?.roles?.includes('wali_kelas')
                   ? 'Pencatatan harian kehadiran siswa khusus rombel binaan Anda untuk akumulasi otomatis buku rapor.'
-                  : 'Catat keterlaksanaan modul ajar, aktivitas Deep Learning, dan catatan presensi siswa pada jam tatap muka.'}
+                  : 'Catat keterlaksanaan modul ajar, aktivitas pembelajaran mendalam, dan dokumentasi jam tatap muka.'}
               </p>
             </div>
           </div>
@@ -213,7 +223,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
           <div className="flex items-center gap-2 self-end sm:self-center">
             {user?.roles?.includes('wali_kelas') ? (
               <button
-                onClick={() => onNavigate('presensi')}
+                onClick={() => navigateWithWorkspace('presensi')}
                 className="px-3.5 py-2 rounded-lg bg-emerald-700 text-white font-semibold text-xs hover:bg-emerald-800 transition-colors flex items-center gap-1.5 shadow-xs"
               >
                 <span>Buka Presensi Rombel</span>
@@ -221,7 +231,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
               </button>
             ) : (
               <button
-                onClick={() => onNavigate('jurnal-mengajar')}
+                onClick={() => navigateWithWorkspace('jurnal-mengajar')}
                 className="px-3.5 py-2 rounded-lg bg-emerald-700 text-white font-semibold text-xs hover:bg-emerald-800 transition-colors flex items-center gap-1.5 shadow-xs"
               >
                 <span>Buka Jurnal Mengajar</span>
@@ -232,15 +242,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
         </div>
       </div>
 
-      {/* =========================================================================
-          2. MATA PELAJARAN (STRUKTUR HIERARKIS SESUAI SPESIFIKASI PENGGUNA)
-             |---- BAHASA INDONESIA
-                     ---- Perangkat Pembelajaran (CP, TP, ATP, dll)
-                     ---- Perangkat Evaluasi (Kisi-kisi, Soal, Daftar nilai, dll)
-             |---- IPAS
-          ========================================================================= */}
+      {/* Mata Pelajaran yang Diampu (Dinamis dari Penugasan Mengajar Admin) */}
       <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-xs space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
           <div>
             <div className="flex items-center gap-2">
               <BookOpen className="w-5 h-5 text-emerald-700" />
@@ -249,68 +253,122 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
               </h3>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Kelola Perangkat Pembelajaran dan Perangkat Evaluasi sesuai Kurikulum Merdeka & Kurikulum Berbasis Cinta
+              Terhubung langsung dengan SK Penugasan Mengajar yang ditetapkan Administrator Madrasah
             </p>
           </div>
 
-          {/* Tab Pemilih Mapel */}
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
-            <button
-              onClick={() => setSelectedSubjectTab('bi')}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                selectedSubjectTab === 'bi'
-                  ? 'bg-emerald-700 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              BAHASA INDONESIA
-            </button>
-            <button
-              onClick={() => setSelectedSubjectTab('ipas')}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                selectedSubjectTab === 'ipas'
-                  ? 'bg-emerald-700 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              IPAS
-            </button>
-          </div>
+          {/* Tab Pemilih Mapel Dinamis */}
+          {data.subjectsSummary.length > 0 && (
+            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl flex-wrap">
+              {data.subjectsSummary.map((sbj) => {
+                const isSelected = selectedSubjectGroup?.subjectId === sbj.subjectId;
+                return (
+                  <button
+                    key={sbj.subjectId}
+                    onClick={() => {
+                      setActiveSubjectId(sbj.subjectId);
+                      const firstSlot = sbj.classes[0];
+                      if (firstSlot) {
+                        setActiveAssignmentId(firstSlot.assignmentId);
+                        setWorkspaceSelection({
+                          subjectId: firstSlot.subjectId,
+                          classId: firstSlot.classId,
+                          classLevel: firstSlot.classLevel,
+                          assignmentId: firstSlot.assignmentId,
+                        });
+                      }
+                    }}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      isSelected
+                        ? 'bg-emerald-700 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {sbj.subjectName}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        {/* Workspace Mapel Terpilih */}
-        {selectedSubjectTab === 'bi' ? (
+        {/* Workspace Mapel Terpilih atau Empty State */}
+        {data.subjectsSummary.length === 0 || !selectedSubjectGroup || !selectedSlot ? (
+          <div className="p-6 rounded-xl border border-amber-200 bg-amber-50/70 flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div className="space-y-1 text-xs">
+              <h4 className="font-bold text-amber-950 text-sm">
+                Belum Ada Penugasan Mata Pelajaran untuk Akun Anda
+              </h4>
+              <p className="text-amber-900 leading-relaxed">
+                Administrator madrasah belum memetakan mata pelajaran dan rombel kelas untuk{' '}
+                <strong>{data.teacherName}</strong> di menu <strong>Penugasan Mengajar (SK)</strong>.
+                Setelah Admin menyimpan penugasan, daftar mata pelajaran, perangkat pembelajaran, evaluasi, jurnal, dan leger akan langsung aktif di sini.
+              </p>
+            </div>
+          </div>
+        ) : (
           <div className="space-y-6">
-            {/* Header Mapel */}
-            <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-100 flex items-center justify-between">
+            {/* Header Mapel + Pemilih Rombel Jika Mengampu > 1 Kelas */}
+            <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-200 text-emerald-900">
-                  Mata Pelajaran Utama · Kelas 4
-                </span>
-                <h4 className="font-bold text-sm text-emerald-950 mt-1">
-                  BAHASA INDONESIA (Fase B)
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-200 text-emerald-900">
+                    {selectedSubjectGroup.subjectCategory} · {selectedSlot.className}
+                  </span>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-white text-emerald-800 border border-emerald-200">
+                    Fase {selectedSlot.phase}
+                  </span>
+                </div>
+                <h4 className="font-bold text-sm text-emerald-950 mt-1.5">
+                  {selectedSubjectGroup.subjectName} ({selectedSubjectGroup.subjectCode})
                 </h4>
                 <p className="text-xs text-emerald-800">
-                  Guru Pengampu: {data.teacherName} · Alokasi: 6 JP/Minggu
+                  Guru Pengampu: {data.teacherName} · Rombel Aktif: {selectedSlot.className}
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {selectedSubjectGroup.classes.length > 1 && (
+                  <select
+                    value={selectedSlot.assignmentId}
+                    onChange={(e) => {
+                      const next = selectedSubjectGroup.classes.find(
+                        (c) => c.assignmentId === e.target.value
+                      );
+                      if (next) {
+                        setActiveAssignmentId(next.assignmentId);
+                        setWorkspaceSelection({
+                          subjectId: next.subjectId,
+                          classId: next.classId,
+                          classLevel: next.classLevel,
+                          assignmentId: next.assignmentId,
+                        });
+                      }
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-white border border-emerald-300 text-emerald-900 font-bold text-xs"
+                  >
+                    {selectedSubjectGroup.classes.map((clsSlot) => (
+                      <option key={clsSlot.assignmentId} value={clsSlot.assignmentId}>
+                        {clsSlot.className} (Fase {clsSlot.phase})
+                      </option>
+                    ))}
+                  </select>
+                )}
+
                 <button
-                  onClick={() => onNavigate('arsip-drive')}
+                  onClick={() => navigateWithWorkspace('arsip-drive')}
                   className="px-3 py-1.5 rounded-lg bg-white border border-emerald-200 text-emerald-800 font-semibold text-xs hover:bg-emerald-100/50 flex items-center gap-1.5 transition-colors"
                 >
                   <FolderSync className="w-3.5 h-3.5 text-emerald-700" />
-                  <span>Arsip Dokumen Drive</span>
+                  <span>Arsip Dokumen Drive ({data.submittedDocsCount})</span>
                 </button>
               </div>
             </div>
 
             {/* Dua Kolom: Perangkat Pembelajaran vs Perangkat Evaluasi */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              {/* =========================================================
-                  KOLOM A: PERANGKAT PEMBELAJARAN
-                  (CP, TP, ATP, dll)
-                  ========================================================= */}
+              {/* Kolom A: Perangkat Pembelajaran */}
               <div className="rounded-xl border border-slate-200 bg-slate-50/40 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -320,20 +378,21 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                     </h5>
                   </div>
                   <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded">
-                    Lengkap & Terstruktur
+                    Fase {selectedSlot.phase} · {selectedSlot.className}
                   </span>
                 </div>
 
                 <div className="space-y-2 text-xs">
-                  {/* 1. CP */}
                   <div className="p-3 rounded-lg bg-white border border-slate-200 hover:border-emerald-500 transition-colors">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className="font-bold text-slate-900 font-mono text-xs">CP</span>
-                        <span className="text-slate-700 font-medium">Capaian Pembelajaran Fase B</span>
+                        <span className="text-slate-700 font-medium">
+                          Capaian Pembelajaran {selectedSubjectGroup.subjectName}
+                        </span>
                       </div>
                       <button
-                        onClick={() => onNavigate('cp')}
+                        onClick={() => navigateWithWorkspace('cp')}
                         className="text-[11px] font-bold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-md flex items-center gap-1 transition-colors"
                       >
                         <span>Kelola CP</span>
@@ -341,19 +400,18 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                       </button>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Menyimak, Membaca-Memirsa, Berbicara, & Menulis berbasis Kurikulum Merdeka.
+                      Elemen kompetensi Fase {selectedSlot.phase} untuk {selectedSlot.className}.
                     </p>
                   </div>
 
-                  {/* 2. TP */}
                   <div className="p-3 rounded-lg bg-white border border-slate-200 hover:border-emerald-500 transition-colors">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className="font-bold text-slate-900 font-mono text-xs">TP</span>
-                        <span className="text-slate-700 font-medium">Tujuan Pembelajaran Terpetakan</span>
+                        <span className="text-slate-700 font-medium">Tujuan Pembelajaran</span>
                       </div>
                       <button
-                        onClick={() => onNavigate('tp')}
+                        onClick={() => navigateWithWorkspace('tp')}
                         className="text-[11px] font-bold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-md flex items-center gap-1 transition-colors"
                       >
                         <span>Kelola TP</span>
@@ -361,11 +419,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                       </button>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Target kompetensi peserta didik terintegrasi Kurikulum Berbasis Cinta & Daftar Nilai.
+                      Target kompetensi peserta didik terhubung dengan asesmen & leger nilai.
                     </p>
                   </div>
 
-                  {/* 3. ATP */}
                   <div className="p-3 rounded-lg bg-white border border-slate-200 hover:border-emerald-500 transition-colors">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -373,7 +430,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                         <span className="text-slate-700 font-medium">Alur Tujuan Pembelajaran</span>
                       </div>
                       <button
-                        onClick={() => onNavigate('atp')}
+                        onClick={() => navigateWithWorkspace('atp')}
                         className="text-[11px] font-bold text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-md flex items-center gap-1 transition-colors"
                       >
                         <span>Kelola ATP</span>
@@ -381,32 +438,31 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                       </button>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Urutan sekuensial modul ajar Semester 1 dan 2 (total 72 JP).
+                      Urutan sekuensial materi ajar Semester {data.semesterName} TP {data.academicYearName}.
                     </p>
                   </div>
 
-                  {/* 4. Modul Ajar & LKPD */}
                   <div className="p-3 rounded-lg bg-white border border-slate-200 hover:border-emerald-500 transition-colors">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex items-center gap-2">
                         <span className="font-bold text-slate-900 font-mono text-xs">Modul & LKPD</span>
-                        <span className="text-slate-700 font-medium">Deep Learning & Lembar Kerja</span>
+                        <span className="text-slate-700 font-medium">Perangkat Harian</span>
                       </div>
                       <div className="flex items-center gap-1.5">
                         <button
-                          onClick={() => onNavigate('modul-ajar')}
+                          onClick={() => navigateWithWorkspace('modul-ajar')}
                           className="text-[10px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded transition-colors"
                         >
                           Modul Ajar
                         </button>
                         <button
-                          onClick={() => onNavigate('lkpd')}
+                          onClick={() => navigateWithWorkspace('lkpd')}
                           className="text-[10px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded transition-colors"
                         >
                           LKPD
                         </button>
                         <button
-                          onClick={() => onNavigate('arsip-drive')}
+                          onClick={() => navigateWithWorkspace('arsip-drive')}
                           className="text-[10px] font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded transition-colors"
                         >
                           Drive
@@ -414,15 +470,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                       </div>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Dokumen pembelajaran mendalam tersimpan aman di Google Drive madrasah.
+                      {data.approvedDocsCount} disetujui · {data.revisionDocsCount} perlu revisi.
                     </p>
                   </div>
                 </div>
               </div>
 
-              {/* =========================================================
-                  KOLOM B: PERANGKAT EVALUASI (PER LINGKUP MATERI & STS/SAS)
-                  ========================================================= */}
+              {/* Kolom B: Perangkat Evaluasi */}
               <div className="rounded-xl border border-slate-200 bg-slate-50/40 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -432,103 +486,72 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                     </h5>
                   </div>
                   <span className="text-[10px] font-semibold text-amber-800 bg-amber-100/80 px-2 py-0.5 rounded">
-                    KKTP: 75
+                    KKTP: {data.kktpDefault}
                   </span>
                 </div>
 
                 <div className="space-y-2 text-xs">
-                  {/* LM 1 & LM 2 */}
-                  <div className="p-2.5 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <span className="font-bold text-slate-900 font-mono text-[11px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded mr-1.5">
-                        LM 1 & LM 2
-                      </span>
-                      <span className="text-slate-700 font-medium text-xs">Sudah Besar & Di Bawah Atap</span>
-                      <p className="text-[10px] text-slate-500 mt-0.5">Kisi-kisi & Soal Formatif/Sumatif TP 4.1 s.d. 4.3</p>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => onNavigate('eval-lm1')}
-                        className="px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-[10px]"
+                  {scopeConfigs.map((sc) => {
+                    const viewMap: Record<string, string> = {
+                      LM1: 'eval-lm1',
+                      LM2: 'eval-lm2',
+                      STS: 'eval-sts',
+                      LM3: 'eval-lm3',
+                      LM4: 'eval-lm4',
+                      SAS: 'eval-sas',
+                    };
+                    const targetView = viewMap[sc.scope_key] || 'kisi-kisi';
+                    return (
+                      <div
+                        key={sc.id}
+                        className={`p-2.5 rounded-lg border flex items-center justify-between gap-2 ${
+                          sc.is_special_summative
+                            ? sc.scope_key === 'STS'
+                              ? 'bg-amber-50/70 border-amber-300'
+                              : 'bg-emerald-50/70 border-emerald-300'
+                            : 'bg-white border-slate-200'
+                        }`}
                       >
-                        LM 1
-                      </button>
-                      <button
-                        onClick={() => onNavigate('eval-lm2')}
-                        className="px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-[10px]"
-                      >
-                        LM 2
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* KHUSUS: SUMATIF TENGAH SEMESTER (STS) */}
-                  <div className="p-2.5 rounded-lg bg-amber-50/70 border border-amber-300 flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-extrabold text-[10px] bg-amber-400 text-slate-900 px-2 py-0.5 rounded">
-                          ⭐ STS GANJIL
-                        </span>
-                        <span className="font-bold text-slate-900 text-xs">Sumatif Tengah Semester</span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span
+                              className={`font-bold font-mono text-[10px] px-1.5 py-0.5 rounded ${
+                                sc.scope_key === 'STS'
+                                  ? 'bg-amber-400 text-slate-900 font-extrabold'
+                                  : sc.scope_key === 'SAS'
+                                  ? 'bg-emerald-700 text-white font-extrabold'
+                                  : 'bg-amber-100 text-amber-900'
+                              }`}
+                            >
+                              {sc.code}
+                            </span>
+                            <span className="text-slate-800 font-semibold text-xs truncate">
+                              {sc.title}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-0.5 truncate">
+                            TP: {sc.associated_tps.join(', ')}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => navigateWithWorkspace(targetView)}
+                          className={`px-2.5 py-1 rounded-lg font-bold text-[11px] shrink-0 transition-colors ${
+                            sc.scope_key === 'STS'
+                              ? 'bg-amber-400 hover:bg-amber-500 text-slate-900'
+                              : sc.scope_key === 'SAS'
+                              ? 'bg-emerald-700 hover:bg-emerald-800 text-white'
+                              : 'bg-amber-50 hover:bg-amber-100 text-amber-900'
+                          }`}
+                        >
+                          Buka {sc.code}
+                        </button>
                       </div>
-                      <p className="text-[10px] text-amber-900 mt-0.5">Naskah ulangan tengah semester & rekap capaian tengah semester.</p>
-                    </div>
-                    <button
-                      onClick={() => onNavigate('eval-sts')}
-                      className="px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-500 text-slate-900 font-bold text-xs shadow-xs"
-                    >
-                      Buka STS
-                    </button>
-                  </div>
+                    );
+                  })}
 
-                  {/* LM 3 & LM 4 */}
-                  <div className="p-2.5 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <span className="font-bold text-slate-900 font-mono text-[11px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded mr-1.5">
-                        LM 3 & LM 4
-                      </span>
-                      <span className="text-slate-700 font-medium text-xs">Lihat Sekitar & Meliuk Menerjang</span>
-                      <p className="text-[10px] text-slate-500 mt-0.5">Kisi-kisi & Soal Formatif/Sumatif TP 4.4 & 4.5</p>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => onNavigate('eval-lm3')}
-                        className="px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-[10px]"
-                      >
-                        LM 3
-                      </button>
-                      <button
-                        onClick={() => onNavigate('eval-lm4')}
-                        className="px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-[10px]"
-                      >
-                        LM 4
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* KHUSUS: SUMATIF AKHIR SEMESTER (SAS) */}
-                  <div className="p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-300 flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-extrabold text-[10px] bg-emerald-700 text-white px-2 py-0.5 rounded">
-                          🏆 SAS GANJIL
-                        </span>
-                        <span className="font-bold text-slate-900 text-xs">Sumatif Akhir Semester</span>
-                      </div>
-                      <p className="text-[10px] text-emerald-800 mt-0.5">Asesmen komprehensif penentu nilai rapor semester ganjil.</p>
-                    </div>
+                  <div className="pt-1.5 border-t border-slate-200/80 flex items-center justify-between text-xs flex-wrap gap-2">
                     <button
-                      onClick={() => onNavigate('eval-sas')}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs shadow-xs"
-                    >
-                      Buka SAS
-                    </button>
-                  </div>
-
-                  {/* Integrasi Buku Nilai, Remedial & Analisis */}
-                  <div className="pt-1.5 border-t border-slate-200/80 flex items-center justify-between text-xs">
-                    <button
-                      onClick={() => onNavigate('asesmen-nilai')}
+                      onClick={() => navigateWithWorkspace('asesmen-nilai')}
                       className="text-emerald-800 hover:text-emerald-950 font-bold flex items-center gap-1"
                     >
                       <span>Buku Nilai</span>
@@ -536,178 +559,22 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                     </button>
                     <div className="flex items-center gap-1.5">
                       <button
-                        onClick={() => onNavigate('remedial-pengayaan')}
+                        onClick={() => navigateWithWorkspace('remedial-pengayaan')}
                         className="text-[10px] font-semibold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 px-2 py-0.5 rounded"
                       >
                         Remedial
                       </button>
                       <button
-                        onClick={() => onNavigate('analisis-nilai')}
+                        onClick={() => navigateWithWorkspace('analisis-nilai')}
                         className="text-[10px] font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 px-2 py-0.5 rounded"
                       >
                         Analisis
                       </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          /* =========================================================================
-             MATA PELAJARAN: IPAS (KELAS 4)
-             ========================================================================= */
-          <div className="space-y-6">
-            <div className="p-3.5 rounded-xl bg-sky-50/70 border border-sky-100 flex items-center justify-between">
-              <div>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-200 text-sky-900">
-                  Mata Pelajaran Pendukung · Kelas 4
-                </span>
-                <h4 className="font-bold text-sm text-sky-950 mt-1">
-                  ILMU PENGETAHUAN ALAM DAN SOSIAL (IPAS)
-                </h4>
-                <p className="text-xs text-sky-800">
-                  Fase B · Alokasi: 5 JP/Minggu · Eksperimen & Lingkungan Madrasah
-                </p>
-              </div>
-              <button
-                onClick={() => onNavigate('arsip-drive')}
-                className="px-3 py-1.5 rounded-lg bg-white border border-sky-200 text-sky-800 font-semibold text-xs hover:bg-sky-100/50 flex items-center gap-1.5 transition-colors"
-              >
-                <FolderSync className="w-3.5 h-3.5 text-sky-700" />
-                <span>Arsip IPAS Drive</span>
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              {/* Perangkat Pembelajaran IPAS */}
-              <div className="rounded-xl border border-slate-200 bg-slate-50/40 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-sky-600" />
-                    <h5 className="font-bold text-xs uppercase tracking-wider text-slate-800">
-                      Perangkat Pembelajaran IPAS
-                    </h5>
-                  </div>
-                  <span className="text-[10px] font-semibold text-sky-700 bg-sky-100 px-2 py-0.5 rounded">
-                    Fase B
-                  </span>
-                </div>
-                <div className="space-y-2 text-xs">
-                  <div className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-slate-800">CP IPAS: Bagian Tumbuhan & Wujud Zat</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">Menganalisis hubungan bentuk serta fungsi tubuh tumbuhan.</p>
-                    </div>
-                    <button
-                      onClick={() => onNavigate('cp')}
-                      className="px-2.5 py-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-800 font-bold text-[11px]"
-                    >
-                      Kelola CP
-                    </button>
-                  </div>
-
-                  <div className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-slate-800">TP & ATP: 4 Bab Pembelajaran Semester Ganjil</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">Tumbuhan Sumber Kehidupan, Wujud Zat & Gaya di Sekitar.</p>
-                    </div>
-                    <div className="flex items-center gap-1">
                       <button
-                        onClick={() => onNavigate('tp')}
-                        className="px-2 py-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-800 font-bold text-[10px]"
+                        onClick={() => navigateWithWorkspace('leger-nilai')}
+                        className="text-[10px] font-semibold text-white bg-emerald-700 hover:bg-emerald-800 px-2 py-0.5 rounded"
                       >
-                        TP
-                      </button>
-                      <button
-                        onClick={() => onNavigate('atp')}
-                        className="px-2 py-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-800 font-bold text-[10px]"
-                      >
-                        ATP
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-slate-800">Modul Ajar & LKPD Eksperimen Sains</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">Praktikum pengamatan lingkungan daun madrasah.</p>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => onNavigate('modul-ajar')}
-                        className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-[10px]"
-                      >
-                        Modul
-                      </button>
-                      <button
-                        onClick={() => onNavigate('lkpd')}
-                        className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-[10px]"
-                      >
-                        LKPD
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Perangkat Evaluasi IPAS */}
-              <div className="rounded-xl border border-slate-200 bg-slate-50/40 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-amber-500" />
-                    <h5 className="font-bold text-xs uppercase tracking-wider text-slate-800">
-                      Perangkat Evaluasi IPAS
-                    </h5>
-                  </div>
-                  <span className="text-[10px] font-semibold text-amber-800 bg-amber-100 px-2 py-0.5 rounded">
-                    KKTP: 75
-                  </span>
-                </div>
-                <div className="space-y-2 text-xs">
-                  <div className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-slate-800">Kisi-kisi & Rubrik Observasi Praktikum</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">Kriteria penilaian kinerja saintifik dan proses sains.</p>
-                    </div>
-                    <button
-                      onClick={() => onNavigate('kisi-kisi')}
-                      className="px-2.5 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-[11px]"
-                    >
-                      Kisi-kisi
-                    </button>
-                  </div>
-
-                  <div className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-slate-800">Bank Soal Formatif & Sumatif IPAS</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">Soal kontekstual lingkungan alam sekitar Soborejo.</p>
-                    </div>
-                    <button
-                      onClick={() => onNavigate('soal-asesmen')}
-                      className="px-2.5 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-[11px]"
-                    >
-                      Soal
-                    </button>
-                  </div>
-
-                  <div className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <p className="font-bold text-slate-800">Daftar Nilai, Remedial & Analisis KKTP</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">28 siswa tercatat tuntas kriteria.</p>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => onNavigate('asesmen-nilai')}
-                        className="px-2 py-1 rounded bg-emerald-700 text-white font-bold text-[10px]"
-                      >
-                        Nilai
-                      </button>
-                      <button
-                        onClick={() => onNavigate('remedial-pengayaan')}
-                        className="px-2 py-1 rounded bg-amber-100 text-amber-900 font-bold text-[10px]"
-                      >
-                        Remedial
+                        Leger Rapor
                       </button>
                     </div>
                   </div>
@@ -718,11 +585,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
         )}
       </div>
 
-      {/* =========================================================================
-          3. JURNAL MENGAJAR & SUPERVISI (TABEL & EKSPOR CSV / PDF)
-          ========================================================================= */}
+      {/* Jurnal Mengajar & Riwayat Supervisi Real */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Modul Jurnal Mengajar Terstruktur */}
         <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -731,32 +595,39 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
                 <h4 className="font-bold text-sm text-slate-900">Jurnal Mengajar Harian</h4>
               </div>
               <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                Tabel & Ekspor
+                {data.journalsCount} Catatan
               </span>
             </div>
             <p className="text-xs text-slate-500 mb-4">
-              Daftar kegiatan tatap muka KBM, capaian materi, Kurikulum Berbasis Cinta, dan refleksi pembelajaran yang dapat diekspor ke Excel/CSV dan PDF.
+              Daftar kegiatan tatap muka KBM, capaian materi, dan refleksi pembelajaran yang dapat diekspor ke CSV dan PDF.
             </p>
 
-            {/* Cuplikan Jurnal Terakhir */}
-            <div className="space-y-2">
-              {data.recentJournals.slice(0, 2).map((jrn) => (
-                <div key={jrn.id} className="p-3 rounded-xl bg-slate-50 border border-slate-100 text-xs">
-                  <div className="flex items-center justify-between text-slate-600 font-medium">
-                    <span className="font-bold text-emerald-900">{jrn.className} · {jrn.subjectName}</span>
-                    <span className="text-[10px] text-slate-400 font-mono">{jrn.date}</span>
+            {data.recentJournals.length === 0 ? (
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-100 text-xs text-slate-500 text-center">
+                Belum ada catatan jurnal mengajar untuk akun Anda.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {data.recentJournals.slice(0, 3).map((jrn) => (
+                  <div key={jrn.id} className="p-3 rounded-xl bg-slate-50 border border-slate-100 text-xs">
+                    <div className="flex items-center justify-between text-slate-600 font-medium">
+                      <span className="font-bold text-emerald-900">
+                        {jrn.className} · {jrn.subjectName}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-mono">{jrn.date}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-700 font-medium mt-1 line-clamp-2">
+                      {jrn.topic}
+                    </p>
                   </div>
-                  <p className="text-[11px] text-slate-700 font-medium mt-1 line-clamp-2">
-                    {jrn.topic}
-                  </p>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          <div className="pt-4 border-t border-slate-100 mt-4 flex items-center justify-between gap-3">
+          <div className="pt-4 border-t border-slate-100 mt-4">
             <button
-              onClick={() => onNavigate('jurnal-mengajar')}
+              onClick={() => navigateWithWorkspace('jurnal-mengajar')}
               className="px-3.5 py-2 rounded-lg bg-emerald-700 text-white font-semibold text-xs hover:bg-emerald-800 transition-colors flex items-center gap-1.5 shadow-xs w-full justify-center"
             >
               <FileSpreadsheet className="w-3.5 h-3.5" />
@@ -765,7 +636,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
           </div>
         </div>
 
-        {/* Modul Riwayat Supervisi Akademik Kepala Madrasah */}
         <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -778,30 +648,43 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
               </span>
             </div>
             <p className="text-xs text-slate-500 mb-4">
-              Hasil observasi langsung Kepala Madrasah: skor instrumen, Kurikulum Berbasis Cinta, aspek Deep Learning, dan rencana tindak lanjut.
+              Hasil observasi langsung Kepala Madrasah: skor instrumen, catatan pembinaan, dan rencana tindak lanjut.
             </p>
 
-            {/* Ringkasan Skor Supervisi Guru */}
-            <div className="p-3.5 rounded-xl bg-amber-50/60 border border-amber-200/80 text-xs space-y-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-slate-900">Supervisi Pelaksanaan KBM Semester Ini</p>
-                  <p className="text-[11px] text-slate-600">Supervisor: H. Ahmad Fauzi, S.Pd.I., M.Pd.</p>
+            {data.recentSupervision ? (
+              <div className="p-3.5 rounded-xl bg-amber-50/60 border border-amber-200/80 text-xs space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-bold text-slate-900">
+                      Supervisi {data.recentSupervision.subjectName} ({data.recentSupervision.className})
+                    </p>
+                    <p className="text-[11px] text-slate-600">
+                      Supervisor: {data.recentSupervision.supervisorName} · {data.recentSupervision.date}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-lg font-extrabold text-emerald-800 font-mono">
+                      {data.recentSupervision.totalScore}
+                    </span>
+                    <p className="text-[10px] font-bold text-emerald-700">
+                      {data.recentSupervision.predicate}
+                    </p>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-lg font-extrabold text-emerald-800 font-mono">92</span>
-                  <p className="text-[10px] font-bold text-emerald-700">Amat Baik</p>
-                </div>
+                <p className="text-[11px] text-slate-600 italic border-t border-amber-200/60 pt-2">
+                  "{data.recentSupervision.recommendations}"
+                </p>
               </div>
-              <p className="text-[11px] text-slate-600 italic border-t border-amber-200/60 pt-2">
-                "Penguasaan materi sangat prima, suasana kelas hangat penuh cinta, murid sangat aktif dan antusias."
-              </p>
-            </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-100 text-xs text-slate-500 text-center">
+                Belum ada riwayat supervisi akademik yang tercatat untuk akun Anda.
+              </div>
+            )}
           </div>
 
-          <div className="pt-4 border-t border-slate-100 mt-4 flex items-center justify-between gap-3">
+          <div className="pt-4 border-t border-slate-100 mt-4">
             <button
-              onClick={() => onNavigate('supervisi-guru')}
+              onClick={() => navigateWithWorkspace('supervisi-guru')}
               className="px-3.5 py-2 rounded-lg bg-amber-400 text-slate-900 font-bold text-xs hover:bg-amber-500 transition-colors flex items-center gap-1.5 shadow-xs w-full justify-center"
             >
               <Award className="w-3.5 h-3.5" />
@@ -810,46 +693,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
           </div>
         </div>
       </div>
-
-      {/* =========================================================================
-          MODAL DETAIL ITEM PERANGKAT (CP / TP / ATP / KISI / SOAL)
-          ========================================================================= */}
-      {activeModalItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-xl border border-slate-200 space-y-4 max-h-[85vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h4 className="font-bold text-sm text-slate-900">{activeModalItem.title}</h4>
-              <button
-                onClick={() => setActiveModalItem(null)}
-                className="text-xs text-slate-400 hover:text-slate-700 p-1 font-bold"
-              >
-                Tutup
-              </button>
-            </div>
-
-            <div className="py-2">{activeModalItem.content}</div>
-
-            <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-              <button
-                onClick={() => setActiveModalItem(null)}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors"
-              >
-                Kembali
-              </button>
-              <button
-                onClick={() => {
-                  setActiveModalItem(null);
-                  onNavigate('arsip-drive');
-                }}
-                className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 transition-colors flex items-center gap-1.5"
-              >
-                <FolderSync className="w-3.5 h-3.5" />
-                <span>Buka Dokumen Google Drive</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
+

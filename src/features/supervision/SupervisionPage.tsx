@@ -7,6 +7,7 @@ import {
   ClassRoom,
   Subject,
   FollowupStatus,
+  SystemSettings,
 } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { printDocumentDirectly } from '../../services/printService';
@@ -34,6 +35,12 @@ export const SupervisionPage: React.FC = () => {
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [classes, setClasses] = useState<ClassRoom[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [activeAcademicYearId, setActiveAcademicYearId] = useState<string>('');
+  const [activeAcademicYearName, setActiveAcademicYearName] = useState<string>('2025/2026');
+  const [activeSemesterId, setActiveSemesterId] = useState<string>('');
+  const [activeSemesterType, setActiveSemesterType] = useState<string>('Ganjil');
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [teacherFilter, setTeacherFilter] = useState<string>('all');
@@ -42,9 +49,9 @@ export const SupervisionPage: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Form State: Formulir Supervisi Baru Langsung di Aplikasi
-  const [teacherId, setTeacherId] = useState<string>('tch-1');
-  const [classId, setClassId] = useState<string>('cls-4');
-  const [subjectId, setSubjectId] = useState<string>('sbj-ind');
+  const [teacherId, setTeacherId] = useState<string>('');
+  const [classId, setClassId] = useState<string>('');
+  const [subjectId, setSubjectId] = useState<string>('');
   const [supervisionDate, setSupervisionDate] = useState<string>(
     new Date().toISOString().split('T')[0]
   );
@@ -61,22 +68,57 @@ export const SupervisionPage: React.FC = () => {
   const [actionPlan, setActionPlan] = useState<string>('');
   const [totalScore, setTotalScore] = useState<number>(90);
 
+  const isTeacherScoped = activeRole === 'guru' || activeRole === 'wali_kelas';
+
   const loadData = async () => {
     setIsLoading(true);
     try {
-      const [recs, tchs, clss, sbjs] = await Promise.all([
+      const [recs, tchs, clss, sbjs, sysSettings, years, sems, teacher] = await Promise.all([
         supervisionService.getRecords(),
         academicService.getTeachers(),
         academicService.getClasses(),
         academicService.getSubjects(),
+        academicService.getSettings(),
+        academicService.getAcademicYears(),
+        academicService.getSemesters(),
+        academicService.resolveTeacherForUser(user),
       ]);
-      setRecords(recs);
-      setTeachers(tchs);
+
+      setResolvedTeacher(teacher);
+      setSettings(sysSettings);
+
+      const activeYear =
+        years.find((y) => y.id === sysSettings.active_academic_year_id) ||
+        years.find((y) => y.is_active) ||
+        years[0];
+      const activeSem =
+        sems.find((s) => s.id === sysSettings.active_semester_id) ||
+        sems.find((s) => s.is_active) ||
+        sems[0];
+
+      setActiveAcademicYearId(activeYear?.id || '');
+      if (activeYear?.name) setActiveAcademicYearName(activeYear.name);
+      setActiveSemesterId(activeSem?.id || '');
+      if (activeSem?.semester_type) setActiveSemesterType(activeSem.semester_type);
+
+      const scopedRecs = isTeacherScoped
+        ? teacher
+          ? recs.filter((r) => r.teacher_id === teacher.id)
+          : []
+        : recs;
+
+      const scopedTeachers = isTeacherScoped ? (teacher ? [teacher] : []) : tchs;
+
+      setRecords(scopedRecs);
+      setTeachers(scopedTeachers);
+      if (isTeacherScoped && teacher) {
+        setTeacherFilter(teacher.id);
+      }
       setClasses(clss);
       setSubjects(sbjs);
-      if (tchs.length > 0) setTeacherId(tchs[0].id);
-      if (clss.length > 0) setClassId(clss[0].id);
-      if (sbjs.length > 0) setSubjectId(sbjs[0].id);
+      if (scopedTeachers.length > 0 && !teacherId) setTeacherId(scopedTeachers[0].id);
+      if (clss.length > 0 && !classId) setClassId(clss[0].id);
+      if (sbjs.length > 0 && !subjectId) setSubjectId(sbjs[0].id);
     } catch (err) {
       console.error('Gagal memuat data supervisi:', err);
     } finally {
@@ -85,11 +127,20 @@ export const SupervisionPage: React.FC = () => {
   };
 
   useEffect(() => {
-    loadData();
-  }, []);
+    void loadData();
+  }, [activeRole, user?.id]);
 
   useRealtimeSync(
-    ['simpel_supervision_records', 'simpel_supervision_instruments', 'simpel_teachers', 'simpel_classes', 'simpel_subjects'],
+    [
+      'simpel_supervision_records',
+      'simpel_supervision_instruments',
+      'simpel_teachers',
+      'simpel_classes',
+      'simpel_subjects',
+      'simpel_settings',
+      'simpel_academic_years',
+      'simpel_semesters',
+    ],
     () => {
       void loadData();
     }
@@ -109,9 +160,9 @@ export const SupervisionPage: React.FC = () => {
       await supervisionService.createRecord({
         instrument_id: 'ins-1',
         teacher_id: teacherId,
-        supervisor_id: user?.id || 'usr-kamad',
-        academic_year_id: 'ay-2026',
-        semester_id: 'sem-ganjil-2026',
+        supervisor_id: user?.id || '',
+        academic_year_id: activeAcademicYearId || 'ay-2026',
+        semester_id: activeSemesterId || 'sem-ganjil-2026',
         class_id: classId,
         subject_id: subjectId,
         assignment_id: null,
@@ -182,8 +233,8 @@ export const SupervisionPage: React.FC = () => {
         idx + 1,
         r.supervision_date,
         `"${r.teacher?.full_name || 'Guru'}"`,
-        `"${r.class?.name || 'Kelas 4'}"`,
-        `"${r.subject?.name || 'Mapel'}"`,
+        `"${r.class?.name || '-'}"`,
+        `"${r.subject?.name || '-'}"`,
         `"${r.topic.replace(/"/g, '""')}"`,
         r.percentage_score || r.total_score || 0,
         `"${r.predicate || 'Baik'}"`,
@@ -215,8 +266,8 @@ export const SupervisionPage: React.FC = () => {
       <tr>
         <td class="center">${idx + 1}</td>
         <td><strong>${r.teacher ? `${r.teacher.title_prefix || ''} ${r.teacher.full_name} ${r.teacher.title_suffix || ''}`.trim() : 'Guru Madrasah'}</strong><br><small>NIP: ${r.teacher?.nip || '-'}</small></td>
-        <td>${r.subject ? r.subject.name : 'Mata Pelajaran'}</td>
-        <td class="center">${r.class ? r.class.name : 'Kelas 4'}</td>
+        <td>${r.subject ? r.subject.name : '-'}</td>
+        <td class="center">${r.class ? r.class.name : '-'}</td>
         <td class="center">${r.supervision_date}</td>
         <td class="center font-bold" style="font-size:11pt;color:#047857;">${r.total_score}</td>
         <td class="center font-bold">${r.predicate}</td>
@@ -244,23 +295,30 @@ export const SupervisionPage: React.FC = () => {
       </table>
     `;
 
+    const leftSignerName = resolvedTeacher
+      ? `${resolvedTeacher.title_prefix || ''} ${resolvedTeacher.full_name} ${resolvedTeacher.title_suffix || ''}`.trim()
+      : user?.profile?.full_name || 'Tim Penilai Madrasah';
+
     printDocumentDirectly(contentHtml, {
       title: 'REKAPITULASI HASIL SUPERVISI AKADEMIK & KBM',
       subtitle: 'Instrumen Observasi Pembelajaran Mendalam & Kurikulum Berbasis Cinta (KBC)',
+      schoolName: settings?.school_name,
+      schoolAddress: settings?.address,
+      logoUrl: settings?.logo_url || undefined,
       metadata: [
-        { label: 'Tahun Pelajaran', value: '2025/2026 (Semester Ganjil)' },
+        { label: 'Tahun Pelajaran', value: `${activeAcademicYearName} (Semester ${activeSemesterType})` },
         { label: 'Sasaran Guru', value: `${filteredRecords.length} Tenaga Pendidik` },
         { label: 'Fokus Pendekatan', value: 'Deep Learning & Kurikulum Berbasis Cinta' },
         { label: 'Tanggal Dokumen', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
       ],
       signature: {
-        leftTitle: 'Pengawas Madrasah / Tim Penilai,',
-        leftName: 'Ust. Ahmad Fauzi, S.Pd.I',
-        leftNip: '198503122019031008',
+        leftTitle: isTeacherScoped ? 'Guru yang Disupervisi,' : 'Tim Penilai / Koordinator Akademik,',
+        leftName: leftSignerName,
+        leftNip: resolvedTeacher?.nip || '-',
         rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
         rightTitle: 'Kepala Madrasah,',
-        rightName: 'MUIN, S.Pd.I',
-        rightNip: '197508152005011004',
+        rightName: settings?.principal_name || 'Kepala Madrasah',
+        rightNip: settings?.principal_nip || '-',
       },
     });
   };
@@ -338,31 +396,37 @@ export const SupervisionPage: React.FC = () => {
           LAPORAN REKAPITULASI HASIL SUPERVISI AKADEMIK & PEMBELAJARAN
         </h2>
         <h3 className="text-sm font-semibold text-slate-800">
-          MI MA’ARIF AL IHSAN SOBOREJO · TAHUN PELAJARAN 2026/2027
+          {settings?.school_name || "MI MA'ARIF AL IHSAN SOBOREJO"} · TAHUN PELAJARAN {activeAcademicYearName}
         </h3>
         <p className="text-xs text-slate-600 mt-0.5">
-          Soborejo, Kec. Pringsurat, Kab. Temanggung, Jawa Tengah · Tanggal Cetak: {new Date().toLocaleDateString('id-ID')}
+          {settings?.address || 'Soborejo, Kec. Pringsurat, Kab. Temanggung, Jawa Tengah'} · Tanggal Cetak: {new Date().toLocaleDateString('id-ID')}
         </p>
       </div>
 
       {/* Toolbar Filter & Pencarian */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 print:hidden">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-slate-700">Filter Guru:</span>
-          <select
-            value={teacherFilter}
-            onChange={(e) => setTeacherFilter(e.target.value)}
-            className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-medium"
-          >
-            <option value="all">Seluruh Dewan Guru</option>
-            {teachers.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.title_prefix ? `${t.title_prefix} ` : ''}
-                {t.full_name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {!isTeacherScoped ? (
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-slate-700">Filter Guru:</span>
+            <select
+              value={teacherFilter}
+              onChange={(e) => setTeacherFilter(e.target.value)}
+              className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-medium"
+            >
+              <option value="all">Seluruh Dewan Guru</option>
+              {teachers.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.title_prefix ? `${t.title_prefix} ` : ''}
+                  {t.full_name}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <div className="text-xs font-semibold text-emerald-900 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg">
+            Menampilkan hasil supervisi untuk: {resolvedTeacher?.full_name || user?.profile?.full_name || 'Guru Aktif'}
+          </div>
+        )}
 
         <div className="relative sm:w-72">
           <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
@@ -423,9 +487,9 @@ export const SupervisionPage: React.FC = () => {
                       </div>
                     </td>
                     <td className="py-3 px-3.5">
-                      <div className="font-semibold text-slate-800">{r.class?.name || 'Kelas 4'}</div>
+                      <div className="font-semibold text-slate-800">{r.class?.name || '-'}</div>
                       <div className="text-[11px] text-emerald-800 font-medium">
-                        {r.subject?.name || 'Bahasa Indonesia'}
+                        {r.subject?.name || '-'}
                       </div>
                     </td>
                     <td className="py-3 px-3.5 font-medium text-slate-900 leading-snug">
@@ -469,18 +533,22 @@ export const SupervisionPage: React.FC = () => {
       {/* Bagian Tanda Tangan Cetak Formal (Hanya tampil saat dicetak) */}
       <div className="hidden print:grid grid-cols-2 gap-8 pt-8 text-xs text-center">
         <div>
-          <p>Supervisor / Penilai,</p>
-          <p className="font-bold">Kepala MI Ma’arif Al Ihsan Soborejo</p>
+          <p>Mengetahui,</p>
+          <p className="font-bold">Kepala {settings?.school_name || "MI Ma'arif Al Ihsan Soborejo"}</p>
           <div className="h-16" />
-          <p className="font-bold underline">Drs. H. Ahmad Ihsan, M.Pd.I</p>
-          <p className="font-mono">NIP. 197508122005011003</p>
+          <p className="font-bold underline">{settings?.principal_name || 'Kepala Madrasah'}</p>
+          <p className="font-mono">NIP. {settings?.principal_nip || '-'}</p>
         </div>
         <div>
-          <p>Soborejo, {new Date().toLocaleDateString('id-ID')}</p>
-          <p className="font-bold">Pengawas Madrasah</p>
+          <p>Temanggung, {new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+          <p className="font-bold">{isTeacherScoped ? 'Guru yang Disupervisi' : 'Tim Penilai Akademik'}</p>
           <div className="h-16" />
-          <p className="font-bold underline">H. Suwandi, S.Ag., M.S.I</p>
-          <p className="font-mono">NIP. 197003151996031002</p>
+          <p className="font-bold underline">
+            {resolvedTeacher
+              ? `${resolvedTeacher.title_prefix || ''} ${resolvedTeacher.full_name} ${resolvedTeacher.title_suffix || ''}`.trim()
+              : user?.profile?.full_name || 'Tim Penilai'}
+          </p>
+          <p className="font-mono">NIP. {resolvedTeacher?.nip || '-'}</p>
         </div>
       </div>
 

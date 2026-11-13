@@ -1,8 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
+import { academicService } from '../../services/academicService';
 import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
+import {
+  Subject,
+  ClassRoom,
+  TeachingAssignment,
+  SystemSettings,
+  Teacher,
+} from '../../types/database.types';
 import {
   CapaianPembelajaranItem,
   TujuanPembelajaranItem,
@@ -18,14 +27,10 @@ import {
   Sparkles,
   Search,
   ExternalLink,
-  Edit2,
   Trash2,
   FolderSync,
   CheckCircle2,
   AlertCircle,
-  ChevronRight,
-  Filter,
-  Check,
   X,
   Heart,
   Layers,
@@ -44,11 +49,21 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
   onNavigate,
 }) => {
   const { user, activeRole } = useAuth();
+  const { selectedSubjectId, selectedClassLevel, setWorkspaceSelection } = useWorkspace();
   const [activeTab, setActiveTab] = useState<CurriculumTab>(defaultTab);
 
+  // Master & Assignment States
+  const [allSubjects, setAllSubjects] = useState<Subject[]>([]);
+  const [allClasses, setAllClasses] = useState<ClassRoom[]>([]);
+  const [teacherAssignments, setTeacherAssignments] = useState<TeachingAssignment[]>([]);
+  const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [activeYearName, setActiveYearName] = useState<string>('2026/2027');
+  const [activeSemesterType, setActiveSemesterType] = useState<'Ganjil' | 'Genap'>('Ganjil');
+
   // Filter States
-  const [selectedSubject, setSelectedSubject] = useState<string>('sbj-ind');
-  const [selectedClass, setSelectedClass] = useState<number>(4);
+  const [selectedSubject, setSelectedSubject] = useState<string>(selectedSubjectId || '');
+  const [selectedClass, setSelectedClass] = useState<number>(selectedClassLevel || 4);
   const [searchTerm, setSearchTerm] = useState<string>('');
 
   // Data States
@@ -65,7 +80,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
 
   // Form States
   const [cpForm, setCpForm] = useState({ element: 'Menyimak', description: '', source: 'BSKAP No. 032/H/KR/2024' });
-  const [tpForm, setTpForm] = useState({ code: 'TP 4.', description: '', scope: '', semester: 'Ganjil' as 'Ganjil' | 'Genap', jp: 12 });
+  const [tpForm, setTpForm] = useState({ code: 'TP 4.1', description: '', scope: '', semester: 'Ganjil' as 'Ganjil' | 'Genap', jp: 12 });
   const [atpForm, setAtpForm] = useState({ order: 1, stage: 'Tahap 1', chapter: '', tpCodes: 'TP 4.1', summary: '', jp: 18, assessment: '' });
   const [modulForm, setModulForm] = useState({ chapter: '', topic: '', tpCode: 'TP 4.1', meetings: '3 Pertemuan (6 JP)', driveUrl: '', intro: '', core: '', closing: '' });
   const [lkpdForm, setLkpdForm] = useState({ title: '', chapter: '', tpCode: 'TP 4.1', activityType: 'Kelompok Kolaboratif' as 'Individu' | 'Kelompok Kolaboratif' | 'Penyelidikan / Eksperimen', instructions: '', rubric: '', driveUrl: '' });
@@ -77,17 +92,96 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
     }
   }, [defaultTab]);
 
-  const loadData = () => {
+  // Sinkronisasi dengan WorkspaceContext ketika user memilih mapel/kelas dari Dashboard atau Sidebar
+  useEffect(() => {
+    if (selectedSubjectId) {
+      setSelectedSubject(selectedSubjectId);
+    }
+    if (selectedClassLevel) {
+      setSelectedClass(selectedClassLevel);
+    }
+  }, [selectedSubjectId, selectedClassLevel]);
+
+  const loadData = useCallback(async () => {
     setCpList(curriculumWorkspaceService.getCPList());
     setTpList(curriculumWorkspaceService.getTPList());
     setAtpList(curriculumWorkspaceService.getATPList());
     setModulList(curriculumWorkspaceService.getModulList());
     setLkpdList(curriculumWorkspaceService.getLKPDList());
-  };
+
+    try {
+      const [sbjs, clss, asgs, sys, years, sems, teacher] = await Promise.all([
+        academicService.getSubjects(),
+        academicService.getClasses(),
+        academicService.getTeachingAssignments(),
+        academicService.getSettings(),
+        academicService.getAcademicYears(),
+        academicService.getSemesters(),
+        academicService.resolveTeacherForUser(user),
+      ]);
+
+      setAllSubjects(sbjs);
+      setAllClasses(clss);
+      setSettings(sys);
+      setResolvedTeacher(teacher);
+
+      const actYear = years.find((y) => y.id === sys.active_academic_year_id || y.is_active) || years[0];
+      const actSem = sems.find((s) => s.id === sys.active_semester_id || s.is_active) || sems[0];
+      if (actYear?.name) setActiveYearName(actYear.name);
+      if (actSem?.semester_type) setActiveSemesterType(actSem.semester_type);
+
+      const relevantAsgs =
+        activeRole === 'guru'
+          ? teacher
+            ? asgs.filter((a) => a.teacher_id === teacher.id)
+            : []
+          : asgs;
+      setTeacherAssignments(relevantAsgs);
+
+      if (activeRole === 'guru') {
+        if (relevantAsgs.length > 0) {
+          const validSubjectIds = Array.from(new Set(relevantAsgs.map((a) => a.subject_id)));
+          const preferredSbj =
+            (selectedSubjectId && validSubjectIds.includes(selectedSubjectId) && selectedSubjectId) ||
+            (selectedSubject && validSubjectIds.includes(selectedSubject) && selectedSubject) ||
+            validSubjectIds[0];
+
+          const slotsForSbj = relevantAsgs.filter((a) => a.subject_id === preferredSbj);
+          const validLevels = slotsForSbj
+            .map((a) => a.class?.level || clss.find((c) => c.id === a.class_id)?.level || 0)
+            .filter((lvl) => lvl > 0);
+          const preferredLevel =
+            (selectedClassLevel && validLevels.includes(selectedClassLevel) && selectedClassLevel) ||
+            (validLevels.includes(selectedClass) && selectedClass) ||
+            validLevels[0] ||
+            4;
+
+          setSelectedSubject(preferredSbj);
+          setSelectedClass(preferredLevel);
+        } else {
+          setSelectedSubject('');
+        }
+      } else {
+        const preferredSbj =
+          (selectedSubjectId && sbjs.some((s) => s.id === selectedSubjectId) && selectedSubjectId) ||
+          (selectedSubject && sbjs.some((s) => s.id === selectedSubject) && selectedSubject) ||
+          sbjs[0]?.id ||
+          '';
+        setSelectedSubject(preferredSbj);
+        if (selectedClassLevel) {
+          setSelectedClass(selectedClassLevel);
+        } else if (clss.length > 0 && !clss.some((c) => c.level === selectedClass)) {
+          setSelectedClass(clss[0].level);
+        }
+      }
+    } catch (err) {
+      console.error('Gagal memuat data referensi perangkat pembelajaran:', err);
+    }
+  }, [activeRole, user?.id, user?.teacherId, selectedSubjectId, selectedClassLevel]);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    void loadData();
+  }, [loadData]);
 
   useRealtimeSync(
     [
@@ -96,9 +190,13 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
       'simpel_mi_atp_items_v1',
       'simpel_mi_modul_items_v1',
       'simpel_mi_lkpd_items_v1',
+      'simpel_assignments',
+      'simpel_subjects',
+      'simpel_classes',
+      'simpel_teachers',
     ],
     () => {
-      loadData();
+      void loadData();
     }
   );
 
@@ -184,9 +282,30 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
     notify(`Berkas ${filename} berhasil diunduh.`);
   };
 
+  // Daftar mata pelajaran & kelas tersedia berdasarkan peran & penugasan
+  const availableSubjects: Subject[] =
+    activeRole === 'guru'
+      ? allSubjects.filter((s) => teacherAssignments.some((a) => a.subject_id === s.id))
+      : allSubjects;
+
+  const availableClasses: ClassRoom[] =
+    activeRole === 'guru'
+      ? allClasses.filter((c) =>
+          teacherAssignments.some(
+            (a) =>
+              a.class_id === c.id && (!selectedSubject || a.subject_id === selectedSubject)
+          )
+        )
+      : allClasses;
+
+  const currentSubjectObj =
+    availableSubjects.find((s) => s.id === selectedSubject) ||
+    allSubjects.find((s) => s.id === selectedSubject);
+  const currentSubjectName = currentSubjectObj?.name || 'Mata Pelajaran';
+  const currentPhase: 'A' | 'B' | 'C' = selectedClass <= 2 ? 'A' : selectedClass <= 4 ? 'B' : 'C';
+
   // Cetak Dokumen
   const handlePrint = () => {
-    const currentSubjectName = selectedSubject === 'sbj-ind' ? 'Bahasa Indonesia' : 'IPAS';
     let title = 'PERANGKAT PEMBELAJARAN MADRASAH';
     let subtitle = `${currentSubjectName} - Kelas ${selectedClass}`;
     let contentHtml = '';
@@ -288,21 +407,21 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
 
     printDocumentDirectly(contentHtml, {
       title,
-      subtitle: `${currentSubjectName} - Kelas ${selectedClass} (Tahun Pelajaran 2025/2026)`,
+      subtitle: `${currentSubjectName} - Kelas ${selectedClass} (Tahun Pelajaran ${activeYearName})`,
       metadata: [
         { label: 'Mata Pelajaran', value: currentSubjectName },
-        { label: 'Tingkat Kelas', value: `Kelas ${selectedClass}` },
+        { label: 'Tingkat Kelas', value: `Kelas ${selectedClass} (Fase ${currentPhase})` },
         { label: 'Kurikulum Acuan', value: 'Kurikulum Merdeka (KMA 450/2024) - KBC' },
         { label: 'Tanggal Dokumen', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
       ],
       signature: {
         leftTitle: 'Guru Pengampu Mata Pelajaran,',
-        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
-        leftNip: '198503122019031008',
+        leftName: user?.profile?.full_name || resolvedTeacher?.full_name || 'Guru Pengampu',
+        leftNip: resolvedTeacher?.nip || '-',
         rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
         rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
-        rightName: 'MUIN, S.Pd.I',
-        rightNip: '197508152005011004',
+        rightName: settings?.principal_name || 'Kepala Madrasah',
+        rightNip: settings?.principal_nip || '-',
       },
     });
   };
@@ -310,14 +429,20 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
   // Handler Submit Form
   const handleSubmitForm = (e: React.FormEvent) => {
     e.preventDefault();
-    const currentSubjectName = selectedSubject === 'sbj-ind' ? 'Bahasa Indonesia' : 'IPAS';
+    if (!selectedSubject) {
+      notify('Pilih mata pelajaran terlebih dahulu.');
+      return;
+    }
+
+    const teacherIdForRecord = resolvedTeacher?.id || user?.teacherId || user?.id || '';
+    const teacherNameForRecord = user?.profile?.full_name || resolvedTeacher?.full_name || 'Guru Madrasah';
 
     if (activeTab === 'cp') {
       const item: CapaianPembelajaranItem = {
         id: editId || `cp-${Date.now()}`,
         subject_id: selectedSubject,
         subject_name: currentSubjectName,
-        phase: 'B',
+        phase: currentPhase,
         class_level: selectedClass,
         element: cpForm.element,
         description: cpForm.description,
@@ -348,7 +473,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
         subject_id: selectedSubject,
         subject_name: currentSubjectName,
         class_level: selectedClass,
-        semester: 'Ganjil',
+        semester: activeSemesterType,
         sequence_order: Number(atpForm.order),
         stage_name: atpForm.stage,
         chapter_title: atpForm.chapter,
@@ -363,12 +488,12 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
     } else if (activeTab === 'modul-ajar') {
       const item: ModulAjarItem = {
         id: editId || `modul-${Date.now()}`,
-        teacher_id: user?.teacherId || 'tch-1',
-        teacher_name: user?.profile?.full_name || 'Guru Pendidik',
+        teacher_id: teacherIdForRecord,
+        teacher_name: teacherNameForRecord,
         subject_id: selectedSubject,
         subject_name: currentSubjectName,
         class_level: selectedClass,
-        semester: 'Ganjil',
+        semester: activeSemesterType,
         chapter_title: modulForm.chapter,
         topic: modulForm.topic,
         target_tp_code: modulForm.tpCode,
@@ -388,8 +513,8 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
     } else {
       const item: LKPDItem = {
         id: editId || `lkpd-${Date.now()}`,
-        teacher_id: user?.teacherId || 'tch-1',
-        teacher_name: user?.profile?.full_name || 'Guru Pendidik',
+        teacher_id: teacherIdForRecord,
+        teacher_name: teacherNameForRecord,
         subject_id: selectedSubject,
         subject_name: currentSubjectName,
         class_level: selectedClass,
@@ -408,24 +533,29 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
 
     setShowModal(false);
     setEditId(null);
-    loadData();
+    void loadData();
   };
 
   // Buka Modal Tambah
   const handleOpenAdd = () => {
+    if (!selectedSubject) {
+      notify('Belum ada mata pelajaran yang ditugaskan untuk Anda.');
+      return;
+    }
     setEditId(null);
+    const defaultTp = `TP ${selectedClass}.1`;
     if (activeTab === 'cp') {
-      setCpForm({ element: 'Menyimak', description: '', source: 'BSKAP No. 032/H/KR/2024' });
+      setCpForm({ element: 'Pemahaman Materi', description: '', source: 'BSKAP No. 032/H/KR/2024' });
     } else if (activeTab === 'tp') {
       const nextNum = filteredTP.length + 1;
-      setTpForm({ code: `TP ${selectedClass}.${nextNum}`, description: '', scope: '', semester: 'Ganjil', jp: 12 });
+      setTpForm({ code: `TP ${selectedClass}.${nextNum}`, description: '', scope: '', semester: activeSemesterType, jp: 12 });
     } else if (activeTab === 'atp') {
       const nextSeq = filteredATP.length + 1;
-      setAtpForm({ order: nextSeq, stage: `Tahap ${nextSeq}`, chapter: '', tpCodes: `TP ${selectedClass}.1`, summary: '', jp: 18, assessment: '' });
+      setAtpForm({ order: nextSeq, stage: `Tahap ${nextSeq}`, chapter: '', tpCodes: defaultTp, summary: '', jp: 18, assessment: '' });
     } else if (activeTab === 'modul-ajar') {
-      setModulForm({ chapter: '', topic: '', tpCode: 'TP 4.1', meetings: '3 Pertemuan (6 JP)', driveUrl: '', intro: 'Tadarus pagi, sapaan kasih sayang guru, apersepsi.', core: 'Eksplorasi konsep bermakna, diskusi kolaboratif santun.', closing: 'Refleksi berkesadaran dan doa penutup.' });
+      setModulForm({ chapter: '', topic: '', tpCode: defaultTp, meetings: '3 Pertemuan (6 JP)', driveUrl: '', intro: 'Tadarus pagi, sapaan kasih sayang guru, apersepsi.', core: 'Eksplorasi konsep bermakna, diskusi kolaboratif santun.', closing: 'Refleksi berkesadaran dan doa penutup.' });
     } else {
-      setLkpdForm({ title: '', chapter: '', tpCode: 'TP 4.1', activityType: 'Kelompok Kolaboratif', instructions: '', rubric: '', driveUrl: '' });
+      setLkpdForm({ title: '', chapter: '', tpCode: defaultTp, activityType: 'Kelompok Kolaboratif', instructions: '', rubric: '', driveUrl: '' });
     }
     setShowModal(true);
   };
@@ -594,18 +724,52 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
           </button>
         </div>
 
+        {/* Banner jika guru belum memiliki penugasan */}
+        {activeRole === 'guru' && availableSubjects.length === 0 && (
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              Belum ada penugasan mata pelajaran dan kelas untuk akun Anda. Hubungi Admin Madrasah untuk menetapkan jadwal mengajar di menu <strong>Penugasan Mengajar</strong>.
+            </span>
+          </div>
+        )}
+
         {/* Filter Baris: Pemilihan Mapel & Kelas & Kotak Pencarian */}
         <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
-          <div className="flex items-center gap-3 w-full sm:w-auto">
+          <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
             <div className="flex items-center gap-1.5">
               <span className="font-semibold text-slate-600">Mata Pelajaran:</span>
               <select
                 value={selectedSubject}
-                onChange={(e) => setSelectedSubject(e.target.value)}
-                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                onChange={(e) => {
+                  const nextSbj = e.target.value;
+                  setSelectedSubject(nextSbj);
+                  const slots = teacherAssignments.filter((a) => a.subject_id === nextSbj);
+                  const firstSlot = slots[0];
+                  const nextClassObj = firstSlot
+                    ? allClasses.find((c) => c.id === firstSlot.class_id)
+                    : allClasses.find((c) => c.level === selectedClass);
+                  const nextLvl = nextClassObj?.level || selectedClass;
+                  setSelectedClass(nextLvl);
+                  setWorkspaceSelection({
+                    subjectId: nextSbj,
+                    classId: nextClassObj?.id || null,
+                    classLevel: nextLvl,
+                    assignmentId: firstSlot?.id || null,
+                  });
+                }}
+                disabled={availableSubjects.length === 0}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-600 disabled:bg-slate-100"
               >
-                <option value="sbj-ind">Bahasa Indonesia</option>
-                <option value="sbj-ipas">IPAS</option>
+                {availableSubjects.length === 0 ? (
+                  <option value="">Belum ada penugasan mapel</option>
+                ) : (
+                  availableSubjects.map((sbj) => (
+                    <option key={sbj.id} value={sbj.id}>
+                      {sbj.name}
+                    </option>
+                  ))
+                )}
               </select>
             </div>
 
@@ -613,15 +777,32 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
               <span className="font-semibold text-slate-600">Tingkat Kelas:</span>
               <select
                 value={selectedClass}
-                onChange={(e) => setSelectedClass(Number(e.target.value))}
-                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                onChange={(e) => {
+                  const nextLvl = Number(e.target.value);
+                  setSelectedClass(nextLvl);
+                  const matchedCls = allClasses.find((c) => c.level === nextLvl);
+                  const matchedAsg = teacherAssignments.find(
+                    (a) => a.subject_id === selectedSubject && a.class_id === matchedCls?.id
+                  );
+                  setWorkspaceSelection({
+                    subjectId: selectedSubject || null,
+                    classId: matchedCls?.id || null,
+                    classLevel: nextLvl,
+                    assignmentId: matchedAsg?.id || null,
+                  });
+                }}
+                disabled={availableClasses.length === 0}
+                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-600 disabled:bg-slate-100"
               >
-                <option value={4}>Kelas 4 (Fase B)</option>
-                <option value={1}>Kelas 1 (Fase A)</option>
-                <option value={2}>Kelas 2 (Fase A)</option>
-                <option value={3}>Kelas 3 (Fase B)</option>
-                <option value={5}>Kelas 5 (Fase C)</option>
-                <option value={6}>Kelas 6 (Fase C)</option>
+                {availableClasses.length === 0 ? (
+                  <option value={selectedClass}>Belum ada rombel</option>
+                ) : (
+                  availableClasses.map((cls) => (
+                    <option key={cls.id} value={cls.level}>
+                      {cls.name} (Fase {cls.phase})
+                    </option>
+                  ))
+                )}
               </select>
             </div>
           </div>
@@ -647,7 +828,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
           <div className="p-4 bg-emerald-50/50 border-b border-emerald-100 flex items-center justify-between">
             <div>
               <h3 className="font-bold text-sm text-emerald-950">
-                Daftar Capaian Pembelajaran (CP) Fase B · Kelas 4
+                Daftar Capaian Pembelajaran (CP) {currentSubjectName} · Fase {currentPhase} (Kelas {selectedClass})
               </h3>
               <p className="text-xs text-emerald-700">
                 Elemen kompetensi dasar yang harus dicapai peserta didik pada akhir fase.
@@ -1039,7 +1220,7 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
           <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <h3 className="font-bold text-sm text-slate-900">
-                Tambah {activeTab.toUpperCase()} Baru ({selectedSubject === 'sbj-ind' ? 'Bahasa Indonesia' : 'IPAS'} - Kelas {selectedClass})
+                Tambah {activeTab.toUpperCase()} Baru ({currentSubjectName} - Kelas {selectedClass})
               </h3>
               <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-700 font-bold p-1">
                 <X className="w-5 h-5" />

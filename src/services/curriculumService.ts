@@ -1,9 +1,12 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 import { DocumentLink, DocumentStatus, DocumentReview } from '../types/database.types';
 import { DEMO_DOCUMENT_LINKS } from '../lib/demoData';
+import { academicService } from './academicService';
 
 const STORAGE_KEY = 'simpel_curriculum_documents';
 const REVIEWS_STORAGE_KEY = 'simpel_curriculum_reviews';
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v?: string | null) => typeof v === 'string' && UUID_REGEX.test(v);
 
 function getLocal<T>(key: string, fallback: T): T {
   try {
@@ -30,57 +33,96 @@ export const curriculumService = {
     documentType?: string;
     status?: DocumentStatus;
   }): Promise<DocumentLink[]> {
+    let baseItems = getLocal<DocumentLink[]>(STORAGE_KEY, DEMO_DOCUMENT_LINKS);
+
     if (isSupabaseConfigured) {
       try {
-        let query = supabase
+        const { data, error } = await supabase
           .from('document_links')
           .select('*, teacher:teachers(*), class:classes(*), subject:subjects(*)')
           .order('created_at', { ascending: false });
 
-        if (filters?.teacherId) query = query.eq('teacher_id', filters.teacherId);
-        if (filters?.classId) query = query.eq('class_id', filters.classId);
-        if (filters?.subjectId) query = query.eq('subject_id', filters.subjectId);
-        if (filters?.documentType) query = query.eq('document_type', filters.documentType);
-        if (filters?.status) query = query.eq('status', filters.status);
-
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) return data as DocumentLink[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const seen = new Set(baseItems.map((d) => d.id));
+          const merged = [...baseItems];
+          for (const item of data as DocumentLink[]) {
+            if (!seen.has(item.id)) {
+              merged.push(item);
+              seen.add(item.id);
+            }
+          }
+          baseItems = merged;
+        }
       } catch (err) {
         console.warn('Supabase getDocuments fallback:', err);
       }
     }
 
-    let items = getLocal<DocumentLink[]>(STORAGE_KEY, DEMO_DOCUMENT_LINKS);
+    const [teachers, classes, subjects] = await Promise.all([
+      academicService.getTeachers(),
+      academicService.getClasses(),
+      academicService.getSubjects(),
+    ]);
+
+    let items = baseItems.map((d) => ({
+      ...d,
+      teacher: teachers.find((t) => t.id === d.teacher_id) || d.teacher,
+      class: classes.find((c) => c.id === d.class_id) || d.class,
+      subject: subjects.find((s) => s.id === d.subject_id) || d.subject,
+    }));
+
     if (filters?.teacherId) items = items.filter((d) => d.teacher_id === filters.teacherId);
     if (filters?.classId) items = items.filter((d) => d.class_id === filters.classId);
     if (filters?.subjectId) items = items.filter((d) => d.subject_id === filters.subjectId);
     if (filters?.documentType) items = items.filter((d) => d.document_type === filters.documentType);
     if (filters?.status) items = items.filter((d) => d.status === filters.status);
 
-    return items;
+    return items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
   },
 
   async createDocument(payload: Omit<DocumentLink, 'id' | 'created_at' | 'updated_at'>): Promise<DocumentLink> {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `doc-${Date.now()}`;
-    const newDoc: DocumentLink = {
+    const [teachers, classes, subjects] = await Promise.all([
+      academicService.getTeachers(),
+      academicService.getClasses(),
+      academicService.getSubjects(),
+    ]);
+
+    let newDoc: DocumentLink = {
       ...payload,
       id,
+      teacher: teachers.find((t) => t.id === payload.teacher_id),
+      class: classes.find((c) => c.id === payload.class_id),
+      subject: subjects.find((s) => s.id === payload.subject_id),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
-    if (isSupabaseConfigured) {
+    if (
+      isSupabaseConfigured &&
+      isUuid(id) &&
+      isUuid(payload.teacher_id) &&
+      isUuid(payload.class_id) &&
+      isUuid(payload.subject_id)
+    ) {
       try {
-        const { teacher: _t, ...dbDoc } = newDoc;
+        const { teacher: _t, class: _c, subject: _s, ...dbDoc } = newDoc;
         const { data } = await supabase.from('document_links').insert(dbDoc).select().single();
-        if (data) return data as DocumentLink;
+        if (data) {
+          newDoc = {
+            ...(data as DocumentLink),
+            teacher: newDoc.teacher,
+            class: newDoc.class,
+            subject: newDoc.subject,
+          };
+        }
       } catch (err) {
         console.warn('Supabase createDocument fallback:', err);
       }
     }
 
-    const items = await this.getDocuments();
-    const updated = [newDoc, ...items];
+    const items = getLocal<DocumentLink[]>(STORAGE_KEY, DEMO_DOCUMENT_LINKS);
+    const updated = [newDoc, ...items.filter((d) => d.id !== newDoc.id)];
     setLocal(STORAGE_KEY, updated);
     return newDoc;
   },
@@ -96,15 +138,19 @@ export const curriculumService = {
       updated_at: new Date().toISOString(),
     };
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id)) {
       try {
-        await supabase.from('document_links').update(updates).eq('id', id);
+        const { teacher: _t, class: _c, subject: _s, ...dbUpdates } = updates;
+        await supabase.from('document_links').update(dbUpdates).eq('id', id);
       } catch (err) {
         console.warn('Supabase updateDocument fallback:', err);
       }
     }
 
-    const updatedList = items.map((d) => (d.id === id ? updatedDoc : d));
+    const localItems = getLocal<DocumentLink[]>(STORAGE_KEY, DEMO_DOCUMENT_LINKS);
+    const updatedList = localItems.some((d) => d.id === id)
+      ? localItems.map((d) => (d.id === id ? updatedDoc : d))
+      : [updatedDoc, ...localItems];
     setLocal(STORAGE_KEY, updatedList);
     return updatedDoc;
   },

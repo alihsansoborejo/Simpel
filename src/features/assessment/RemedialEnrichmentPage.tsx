@@ -1,23 +1,31 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { assessmentService } from '../../services/assessmentService';
 import { academicService } from '../../services/academicService';
-import { RemedialRecord, EnrichmentRecord, Student, TeachingAssignment } from '../../types/database.types';
+import {
+  RemedialRecord,
+  EnrichmentRecord,
+  Student,
+  TeachingAssignment,
+  ClassMember,
+} from '../../types/database.types';
+import { useAuth } from '../../context/AuthContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
-  FileSpreadsheet,
   Plus,
   CheckCircle,
   TrendingUp,
-  Award,
   Sparkles,
-  Calendar,
 } from 'lucide-react';
 
 export const RemedialEnrichmentPage: React.FC = () => {
+  const { user, activeRole } = useAuth();
+  const { selectedAssignmentId, selectedSubjectId, selectedClassId } = useWorkspace();
   const [activeTab, setActiveTab] = useState<'remedial' | 'enrichment'>('remedial');
   const [remedials, setRemedials] = useState<RemedialRecord[]>([]);
   const [enrichments, setEnrichments] = useState<EnrichmentRecord[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
+  const [classMembers, setClassMembers] = useState<ClassMember[]>([]);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -27,6 +35,7 @@ export const RemedialEnrichmentPage: React.FC = () => {
   const [showEnrichmentModal, setShowEnrichmentModal] = useState<boolean>(false);
 
   // Form Remedial
+  const [remAssignmentId, setRemAssignmentId] = useState<string>('');
   const [remStudentId, setRemStudentId] = useState<string>('');
   const [remObjective, setRemObjective] = useState<string>('');
   const [remActivity, setRemActivity] = useState<string>('');
@@ -36,49 +45,106 @@ export const RemedialEnrichmentPage: React.FC = () => {
   const [remFollowup, setRemFollowup] = useState<string>('Tuntas KKTP');
 
   // Form Pengayaan
+  const [enrAssignmentId, setEnrAssignmentId] = useState<string>('');
   const [enrStudentId, setEnrStudentId] = useState<string>('');
   const [enrTopic, setEnrTopic] = useState<string>('');
   const [enrActivity, setEnrActivity] = useState<string>('');
   const [enrDate, setEnrDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [enrNotes, setEnrNotes] = useState<string>('');
 
-  const loadData = async () => {
+  const getStudentsForAssignment = useCallback(
+    (asgId: string, asgsPool: TeachingAssignment[], stdsPool: Student[], membersPool: ClassMember[]): Student[] => {
+      const targetAsg = asgsPool.find((a) => a.id === asgId);
+      if (!targetAsg) return stdsPool;
+      const enrolledIds = membersPool
+        .filter((m) => m.class_id === targetAsg.class_id)
+        .map((m) => m.student_id);
+      return stdsPool.filter((s) => enrolledIds.includes(s.id));
+    },
+    []
+  );
+
+  const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [rems, enrs, stds, asgs] = await Promise.all([
+      const [rems, enrs, stds, asgs, members, teacher] = await Promise.all([
         assessmentService.getRemedialRecords(),
         assessmentService.getEnrichmentRecords(),
         academicService.getStudents(),
         academicService.getTeachingAssignments(),
+        academicService.getClassMembers(),
+        academicService.resolveTeacherForUser(user),
       ]);
-      setRemedials(rems);
-      setEnrichments(enrs);
+
+      const scopedAsgs =
+        activeRole === 'guru'
+          ? teacher
+            ? asgs.filter((a) => a.teacher_id === teacher.id)
+            : []
+          : asgs;
+      const scopedIds = new Set(scopedAsgs.map((a) => a.id));
+
+      setRemedials(activeRole === 'guru' ? rems.filter((r) => scopedIds.has(r.assignment_id)) : rems);
+      setEnrichments(activeRole === 'guru' ? enrs.filter((e) => scopedIds.has(e.assignment_id)) : enrs);
       setStudents(stds);
-      setAssignments(asgs);
-      if (stds.length > 0) {
-        setRemStudentId(stds[0].id);
-        setEnrStudentId(stds[0].id);
+      setClassMembers(members);
+      setAssignments(scopedAsgs);
+
+      const defaultAsg =
+        (selectedAssignmentId && scopedAsgs.find((a) => a.id === selectedAssignmentId)) ||
+        scopedAsgs.find(
+          (a) =>
+            (!selectedSubjectId || a.subject_id === selectedSubjectId) &&
+            (!selectedClassId || a.class_id === selectedClassId)
+        ) ||
+        scopedAsgs[0];
+
+      const preferredAsgId = defaultAsg?.id || '';
+      setRemAssignmentId((prev) => (scopedAsgs.some((a) => a.id === prev) ? prev : preferredAsgId));
+      setEnrAssignmentId((prev) => (scopedAsgs.some((a) => a.id === prev) ? prev : preferredAsgId));
+
+      const filteredRemStudents = getStudentsForAssignment(preferredAsgId, scopedAsgs, stds, members);
+      const firstStudent = filteredRemStudents[0] || stds[0];
+      if (firstStudent) {
+        setRemStudentId((prev) =>
+          filteredRemStudents.some((s) => s.id === prev) ? prev : firstStudent.id
+        );
+        setEnrStudentId((prev) =>
+          filteredRemStudents.some((s) => s.id === prev) ? prev : firstStudent.id
+        );
       }
     } catch (err) {
       console.error('Gagal memuat data remedial & pengayaan:', err);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [
+    activeRole,
+    user?.id,
+    user?.teacherId,
+    selectedAssignmentId,
+    selectedSubjectId,
+    selectedClassId,
+    getStudentsForAssignment,
+  ]);
 
   useEffect(() => {
-    loadData();
-  }, []);
-
-  useRealtimeSync(['simpel_remedial', 'simpel_enrichment', 'simpel_students', 'simpel_assignments'], () => {
     void loadData();
-  });
+  }, [loadData]);
+
+  useRealtimeSync(
+    ['simpel_remedial', 'simpel_enrichment', 'simpel_students', 'simpel_assignments', 'simpel_class_members', 'simpel_teachers'],
+    () => {
+      void loadData();
+    }
+  );
 
   const handleCreateRemedial = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!remAssignmentId || !remStudentId) return;
     try {
       await assessmentService.createRemedialRecord({
-        assignment_id: 'asg-1',
+        assignment_id: remAssignmentId,
         student_id: remStudentId,
         unachieved_objective: remObjective,
         remedial_activity: remActivity,
@@ -89,7 +155,7 @@ export const RemedialEnrichmentPage: React.FC = () => {
       });
       setShowRemedialModal(false);
       setStatusMessage('Catatan program remedial berhasil disimpan.');
-      loadData();
+      void loadData();
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (err) {
       console.error('Gagal membuat remedial:', err);
@@ -98,9 +164,10 @@ export const RemedialEnrichmentPage: React.FC = () => {
 
   const handleCreateEnrichment = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!enrAssignmentId || !enrStudentId) return;
     try {
       await assessmentService.createEnrichmentRecord({
-        assignment_id: 'asg-1',
+        assignment_id: enrAssignmentId,
         student_id: enrStudentId,
         objective_topic: enrTopic,
         enrichment_activity: enrActivity,
@@ -109,12 +176,15 @@ export const RemedialEnrichmentPage: React.FC = () => {
       });
       setShowEnrichmentModal(false);
       setStatusMessage('Catatan program pengayaan berhasil disimpan.');
-      loadData();
+      void loadData();
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (err) {
       console.error('Gagal membuat pengayaan:', err);
     }
   };
+
+  const remModalStudents = getStudentsForAssignment(remAssignmentId, assignments, students, classMembers);
+  const enrModalStudents = getStudentsForAssignment(enrAssignmentId, assignments, students, classMembers);
 
   return (
     <div className="space-y-6 max-w-6xl">
@@ -218,25 +288,29 @@ export const RemedialEnrichmentPage: React.FC = () => {
                     </td>
                   </tr>
                 ) : (
-                  remedials.map((r) => (
-                    <tr key={r.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900">{r.student?.full_name || 'Siswa'}</div>
-                        <div className="text-[11px] text-slate-400 font-mono tabular-nums">
-                          NIS: {r.student?.nis}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 text-slate-800 font-medium">{r.unachieved_objective}</td>
-                      <td className="py-3 px-4 text-slate-600">{r.remedial_activity}</td>
-                      <td className="py-3 px-4 text-center font-mono tabular-nums text-rose-700 font-bold">
-                        {r.score_before}
-                      </td>
-                      <td className="py-3 px-4 text-center font-mono tabular-nums text-emerald-800 font-bold bg-emerald-50/50">
-                        {r.score_after}
-                      </td>
-                      <td className="py-3 px-4 text-emerald-900 font-semibold">{r.follow_up_action || 'Tuntas'}</td>
-                    </tr>
-                  ))
+                  remedials.map((r) => {
+                    const asg = r.assignment || assignments.find((a) => a.id === r.assignment_id);
+                    return (
+                      <tr key={r.id} className="hover:bg-slate-50/60 transition-colors">
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-slate-900">{r.student?.full_name || 'Siswa'}</div>
+                          <div className="text-[11px] text-slate-400 font-mono tabular-nums">
+                            NIS: {r.student?.nis || '-'}
+                            {asg ? ` · ${asg.class?.name || ''} ${asg.subject?.name || ''}` : ''}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-slate-800 font-medium">{r.unachieved_objective}</td>
+                        <td className="py-3 px-4 text-slate-600">{r.remedial_activity}</td>
+                        <td className="py-3 px-4 text-center font-mono tabular-nums text-rose-700 font-bold">
+                          {r.score_before}
+                        </td>
+                        <td className="py-3 px-4 text-center font-mono tabular-nums text-emerald-800 font-bold bg-emerald-50/50">
+                          {r.score_after}
+                        </td>
+                        <td className="py-3 px-4 text-emerald-900 font-semibold">{r.follow_up_action || 'Tuntas'}</td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -272,22 +346,26 @@ export const RemedialEnrichmentPage: React.FC = () => {
                     </td>
                   </tr>
                 ) : (
-                  enrichments.map((e) => (
-                    <tr key={e.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900">{e.student?.full_name || 'Siswa'}</div>
-                        <div className="text-[11px] text-slate-400 font-mono tabular-nums">
-                          NIS: {e.student?.nis}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 text-slate-900 font-bold">{e.objective_topic}</td>
-                      <td className="py-3 px-4 text-slate-600">{e.enrichment_activity}</td>
-                      <td className="py-3 px-4 text-center font-mono tabular-nums text-slate-500">
-                        {e.execution_date}
-                      </td>
-                      <td className="py-3 px-4 text-slate-800">{e.result_notes || '-'}</td>
-                    </tr>
-                  ))
+                  enrichments.map((e) => {
+                    const asg = e.assignment || assignments.find((a) => a.id === e.assignment_id);
+                    return (
+                      <tr key={e.id} className="hover:bg-slate-50/60 transition-colors">
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-slate-900">{e.student?.full_name || 'Siswa'}</div>
+                          <div className="text-[11px] text-slate-400 font-mono tabular-nums">
+                            NIS: {e.student?.nis || '-'}
+                            {asg ? ` · ${asg.class?.name || ''} ${asg.subject?.name || ''}` : ''}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-slate-900 font-bold">{e.objective_topic}</td>
+                        <td className="py-3 px-4 text-slate-600">{e.enrichment_activity}</td>
+                        <td className="py-3 px-4 text-center font-mono tabular-nums text-slate-500">
+                          {e.execution_date}
+                        </td>
+                        <td className="py-3 px-4 text-slate-800">{e.result_notes || '-'}</td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -306,6 +384,31 @@ export const RemedialEnrichmentPage: React.FC = () => {
 
             <form onSubmit={handleCreateRemedial} className="space-y-4">
               <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Mata Pelajaran & Kelas</label>
+                <select
+                  value={remAssignmentId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setRemAssignmentId(nextId);
+                    const nextStds = getStudentsForAssignment(nextId, assignments, students, classMembers);
+                    setRemStudentId(nextStds[0]?.id || '');
+                  }}
+                  className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
+                  required
+                >
+                  {assignments.length === 0 ? (
+                    <option value="">Belum ada penugasan mengajar</option>
+                  ) : (
+                    assignments.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.class?.name || '-'} - {a.subject?.name || 'Mata Pelajaran'}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Pilih Siswa</label>
                 <select
                   value={remStudentId}
@@ -313,11 +416,15 @@ export const RemedialEnrichmentPage: React.FC = () => {
                   className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
                   required
                 >
-                  {students.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.full_name} (NIS: {s.nis})
-                    </option>
-                  ))}
+                  {remModalStudents.length === 0 ? (
+                    <option value="">Belum ada siswa terdaftar di rombel ini</option>
+                  ) : (
+                    remModalStudents.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.full_name} (NIS: {s.nis})
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 
@@ -423,6 +530,31 @@ export const RemedialEnrichmentPage: React.FC = () => {
 
             <form onSubmit={handleCreateEnrichment} className="space-y-4">
               <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Mata Pelajaran & Kelas</label>
+                <select
+                  value={enrAssignmentId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setEnrAssignmentId(nextId);
+                    const nextStds = getStudentsForAssignment(nextId, assignments, students, classMembers);
+                    setEnrStudentId(nextStds[0]?.id || '');
+                  }}
+                  className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
+                  required
+                >
+                  {assignments.length === 0 ? (
+                    <option value="">Belum ada penugasan mengajar</option>
+                  ) : (
+                    assignments.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.class?.name || '-'} - {a.subject?.name || 'Mata Pelajaran'}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Pilih Siswa Unggul</label>
                 <select
                   value={enrStudentId}
@@ -430,11 +562,15 @@ export const RemedialEnrichmentPage: React.FC = () => {
                   className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
                   required
                 >
-                  {students.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.full_name} (NIS: {s.nis})
-                    </option>
-                  ))}
+                  {enrModalStudents.length === 0 ? (
+                    <option value="">Belum ada siswa terdaftar di rombel ini</option>
+                  ) : (
+                    enrModalStudents.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.full_name} (NIS: {s.nis})
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 

@@ -12,6 +12,44 @@ export function runDataPurgeIfNecessary(): void {
       return;
     }
 
+    // Jika perangkat baru ini baru saja menarik data/akun tersinkron dari server atau Supabase,
+    // JANGAN menimpa cache dengan data kosong dan JANGAN otomatis login sebagai Administrator!
+    let hasSyncedData = false;
+    try {
+      const existingUsersRaw = localStorage.getItem('simpel_users_cache_v2');
+      if (existingUsersRaw) {
+        const parsedUsers = JSON.parse(existingUsersRaw);
+        if (Array.isArray(parsedUsers) && parsedUsers.length > 1) {
+          hasSyncedData = true;
+        }
+      }
+      if (!hasSyncedData) {
+        for (const checkKey of ['simpel_teachers', 'simpel_students', 'simpel_assessments', 'simpel_teaching_journals']) {
+          const raw = localStorage.getItem(checkKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              hasSyncedData = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!hasSyncedData) {
+        const settingsRaw = localStorage.getItem('simpel_settings');
+        if (settingsRaw && settingsRaw.includes('data:image/')) {
+          hasSyncedData = true;
+        }
+      }
+    } catch {
+      // ignore parse errors
+    }
+
+    if (hasSyncedData) {
+      localStorage.setItem(PURGE_FLAG_KEY, 'true');
+      return;
+    }
+
     // 1. Kosongkan seluruh data operasional (Array kosong)
     const emptyArrayKeys = [
       'simpel_students',

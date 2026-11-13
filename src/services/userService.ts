@@ -1,7 +1,7 @@
 import { supabase, isSupabaseConfigured, createEphemeralSupabaseClient } from '../lib/supabaseClient';
 import { Profile, UserRole, ActivityLog, Teacher } from '../types/database.types';
 import { DEMO_USERS, DEMO_TEACHERS } from '../lib/demoData';
-import { academicService } from './academicService';
+import { academicService, cleanTeacherIdentifier, normalizePersonName } from './academicService';
 import { activityLogService } from './activityLogService';
 
 export interface UserListItem {
@@ -113,6 +113,11 @@ export async function fetchUsersList(filters?: {
   role?: string;
   status?: string;
 }): Promise<UserListItem[]> {
+  try {
+    await academicService.getTeachers();
+  } catch (err) {
+    console.warn('Sinkronisasi awal guru & akun dilewati:', err);
+  }
   const localUsers = getDemoUsers();
   const mergedByEmail = new Map<string, UserListItem>();
 
@@ -241,8 +246,10 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
   const newUserId = `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
   const password = data.password?.trim() || 'AlIhsan2026!';
 
-  const cleanNip = data.nip?.trim() || undefined;
-  const cleanNuptk = data.nuptk?.trim() || undefined;
+  const cleanNip = cleanTeacherIdentifier(data.nip) || undefined;
+  const cleanNuptk = cleanTeacherIdentifier(data.nuptk) || undefined;
+  const cleanPhone = cleanTeacherIdentifier(data.phone_number) || undefined;
+  const normFullName = normalizePersonName(data.full_name);
 
   // Periksa apakah peran mencakup aspek keguruan / akademik
   const isTeacherRole = data.roles.some((r) => ['guru', 'wali_kelas', 'kepala_madrasah'].includes(r));
@@ -254,11 +261,15 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
   if (shouldCreateTeacher) {
     try {
       const existingTeachers = await academicService.getTeachers();
-      // Cek apakah data guru dengan NIP atau Nama yang sama sudah ada di tabel guru
+      const claimedByOthers = new Set(
+        currentUsers.map((u) => u.teacher_info?.id).filter(Boolean) as string[]
+      );
+      // Cek apakah data guru dengan NIP valid atau Nama yang sama sudah ada (dan belum dipakai akun orang lain)
       const matchedTeacher = existingTeachers.find(
         (t) =>
-          (cleanNip && t.nip === cleanNip) ||
-          t.full_name.toLowerCase() === data.full_name.toLowerCase().trim()
+          !claimedByOthers.has(t.id) &&
+          ((cleanNip && cleanTeacherIdentifier(t.nip) === cleanNip) ||
+            normalizePersonName(t.full_name) === normFullName)
       );
 
       if (matchedTeacher) {
@@ -270,7 +281,7 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
           nip: cleanNip || matchedTeacher.nip,
           nuptk: cleanNuptk || matchedTeacher.nuptk,
           gender: data.gender || matchedTeacher.gender,
-          phone_number: data.phone_number || matchedTeacher.phone_number,
+          phone_number: cleanPhone || matchedTeacher.phone_number,
           specialization: data.specialization || matchedTeacher.specialization,
           is_active: true,
         });
@@ -284,7 +295,7 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
           nip: cleanNip || null,
           nuptk: cleanNuptk || null,
           gender: data.gender || 'L',
-          phone_number: data.phone_number || null,
+          phone_number: cleanPhone || null,
           specialization: data.specialization || (data.roles.includes('kepala_madrasah') ? 'Kepala Madrasah' : 'Guru Pengampu'),
           is_active: true,
         });
@@ -307,7 +318,7 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
     id: newUserId,
     email: normalizedEmail,
     full_name: data.full_name.trim(),
-    phone_number: data.phone_number || null,
+    phone_number: cleanPhone || null,
     avatar_url: null,
     is_active: true,
     created_at: new Date().toISOString(),
@@ -316,8 +327,8 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
     title_prefix: data.title_prefix || linkedTeacher?.title_prefix || null,
     title_suffix: data.title_suffix || linkedTeacher?.title_suffix || null,
     gender: data.gender || linkedTeacher?.gender || 'L',
-    nip: data.nip || linkedTeacher?.nip || null,
-    nuptk: data.nuptk || linkedTeacher?.nuptk || null,
+    nip: cleanNip || linkedTeacher?.nip || null,
+    nuptk: cleanNuptk || linkedTeacher?.nuptk || null,
     specialization: data.specialization || linkedTeacher?.specialization || null,
     teacher_info: linkedTeacher
       ? {
@@ -455,19 +466,40 @@ export async function updateUserAndTeacher(
     currentUsers.find((u) => u.email.toLowerCase() === normalizedTargetEmail);
 
   // Sinkronkan ke Data Guru jika terhubung atau memiliki peran pendidik
+  const cleanNip = cleanTeacherIdentifier(payload.nip);
+  const cleanNuptk = cleanTeacherIdentifier(payload.nuptk);
+  const cleanPhone = cleanTeacherIdentifier(payload.phone_number);
+  const normTargetName = normalizePersonName(payload.full_name);
+
   let linkedTeacherInfo = existing?.teacher_info || null;
   const isTeacherRole = payload.roles.some((r) => ['guru', 'wali_kelas', 'kepala_madrasah'].includes(r));
 
-  if (existing?.teacher_info?.id) {
+  const existingTeachers = await academicService.getTeachers();
+  const currentLinkedTeacher = existing?.teacher_info?.id
+    ? existingTeachers.find((t) => t.id === existing.teacher_info?.id)
+    : undefined;
+  const isSharedCollision = Boolean(
+    existing?.teacher_info?.id &&
+      currentUsers.some((u) => u.id !== existing.id && u.teacher_info?.id === existing.teacher_info?.id)
+  );
+  const canUpdateInPlace = Boolean(
+    currentLinkedTeacher &&
+      !isSharedCollision &&
+      (normalizePersonName(currentLinkedTeacher.full_name) === normTargetName ||
+        (existing && normalizePersonName(currentLinkedTeacher.full_name) === normalizePersonName(existing.full_name)))
+  );
+
+  if (canUpdateInPlace && currentLinkedTeacher) {
     try {
-      const updatedTeacher = await academicService.updateTeacher(existing.teacher_info.id, {
-        full_name: payload.full_name,
+      const updatedTeacher = await academicService.updateTeacher(currentLinkedTeacher.id, {
+        user_id: existing?.id || userId,
+        full_name: payload.full_name.trim(),
         title_prefix: payload.title_prefix || null,
         title_suffix: payload.title_suffix || null,
-        nip: payload.nip || null,
-        nuptk: payload.nuptk || null,
+        nip: cleanNip,
+        nuptk: cleanNuptk,
         gender: payload.gender || 'L',
-        phone_number: payload.phone_number || null,
+        phone_number: cleanPhone,
         specialization: payload.specialization || null,
         is_active: payload.is_active,
       });
@@ -480,24 +512,29 @@ export async function updateUserAndTeacher(
       console.warn('Gagal sinkronisasi data guru saat update akun:', err);
     }
   } else if (isTeacherRole) {
-    // Belum punya profil guru, cari berdasarkan NIP/Nama atau otomatis buatkan
+    // Belum punya profil guru (atau terjadi tabrakan ID), cari yang cocok dan belum diklaim akun lain atau buat baru
     try {
-      const existingTeachers = await academicService.getTeachers();
+      const claimedByOthers = new Set(
+        currentUsers
+          .filter((u) => u.id !== existing?.id && u.teacher_info?.id)
+          .map((u) => u.teacher_info!.id)
+      );
       const matchedTeacher = existingTeachers.find(
         (t) =>
-          (payload.nip && t.nip === payload.nip.trim()) ||
-          t.full_name.toLowerCase() === payload.full_name.toLowerCase().trim()
+          !claimedByOthers.has(t.id) &&
+          ((cleanNip && cleanTeacherIdentifier(t.nip) === cleanNip) ||
+            normalizePersonName(t.full_name) === normTargetName)
       );
       if (matchedTeacher) {
         const updatedTeacher = await academicService.updateTeacher(matchedTeacher.id, {
           user_id: existing?.id || userId,
-          full_name: payload.full_name,
-          title_prefix: payload.title_prefix || matchedTeacher.title_prefix,
-          title_suffix: payload.title_suffix || matchedTeacher.title_suffix,
-          nip: payload.nip || matchedTeacher.nip,
-          nuptk: payload.nuptk || matchedTeacher.nuptk,
+          full_name: payload.full_name.trim(),
+          title_prefix: payload.title_prefix ?? matchedTeacher.title_prefix,
+          title_suffix: payload.title_suffix ?? matchedTeacher.title_suffix,
+          nip: cleanNip ?? matchedTeacher.nip,
+          nuptk: cleanNuptk ?? matchedTeacher.nuptk,
           gender: payload.gender || matchedTeacher.gender,
-          phone_number: payload.phone_number || matchedTeacher.phone_number,
+          phone_number: cleanPhone ?? matchedTeacher.phone_number,
           specialization: payload.specialization || matchedTeacher.specialization,
           is_active: payload.is_active,
         });
@@ -509,14 +546,15 @@ export async function updateUserAndTeacher(
       } else {
         const newTeacher = await academicService.createTeacher({
           user_id: existing?.id || userId,
-          full_name: payload.full_name,
+          full_name: payload.full_name.trim(),
           title_prefix: payload.title_prefix || null,
           title_suffix: payload.title_suffix || null,
-          nip: payload.nip || null,
-          nuptk: payload.nuptk || null,
+          nip: cleanNip,
+          nuptk: cleanNuptk,
           gender: payload.gender || 'L',
-          phone_number: payload.phone_number || null,
-          specialization: payload.specialization || 'Guru Pengampu',
+          phone_number: cleanPhone,
+          specialization:
+            payload.specialization || (payload.roles.includes('kepala_madrasah') ? 'Kepala Madrasah' : 'Guru Pengampu'),
           is_active: payload.is_active,
         });
         linkedTeacherInfo = {
@@ -530,28 +568,34 @@ export async function updateUserAndTeacher(
     }
   }
 
+  const { teacher_detached: _ignoredDetached, ...baseExisting } = (existing || {}) as UserListItem & {
+    teacher_detached?: boolean;
+  };
+
   const updatedUser: UserListItem = {
+    ...baseExisting,
     id: existing?.id || userId,
     avatar_url: existing?.avatar_url || null,
     created_at: existing?.created_at || new Date().toISOString(),
-    full_name: payload.full_name,
+    full_name: payload.full_name.trim(),
     email: normalizedTargetEmail,
-    phone_number: payload.phone_number || null,
+    phone_number: cleanPhone,
     password: payload.password || existing?.password || 'AlIhsan2026!',
     roles: payload.roles,
     is_active: payload.is_active,
     title_prefix: payload.title_prefix || null,
     title_suffix: payload.title_suffix || null,
     gender: payload.gender || 'L',
-    nip: payload.nip || null,
-    nuptk: payload.nuptk || null,
+    nip: cleanNip,
+    nuptk: cleanNuptk,
     specialization: payload.specialization || null,
     teacher_info: linkedTeacherInfo,
   };
 
+  const latestUsers = getDemoUsers();
   const updatedList = existing
-    ? currentUsers.map((u) => (u.id === existing.id ? updatedUser : u))
-    : [updatedUser, ...currentUsers];
+    ? latestUsers.map((u) => (u.id === existing.id ? updatedUser : u))
+    : [updatedUser, ...latestUsers];
   saveDemoUsers(updatedList);
 
   return updatedUser;

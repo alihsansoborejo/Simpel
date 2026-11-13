@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { WorkspaceProvider } from './context/WorkspaceContext';
 import { AppSettingsProvider } from './context/AppSettingsContext';
 import { GoogleDriveProvider } from './context/GoogleDriveContext';
 import { SyncProvider } from './context/SyncContext';
@@ -331,9 +332,11 @@ export default function App() {
     <SyncProvider>
       <AppSettingsProvider>
         <AuthProvider>
-          <GoogleDriveProvider>
-            <MainAppContent />
-          </GoogleDriveProvider>
+          <WorkspaceProvider>
+            <GoogleDriveProvider>
+              <MainAppContent />
+            </GoogleDriveProvider>
+          </WorkspaceProvider>
         </AuthProvider>
       </AppSettingsProvider>
     </SyncProvider>

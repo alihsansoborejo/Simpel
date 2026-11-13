@@ -209,6 +209,8 @@ export interface DocumentLink {
   created_at: string;
   updated_at: string;
   teacher?: Teacher;
+  class?: ClassRoom;
+  subject?: Subject;
 }
 
 export interface ActivityLog {

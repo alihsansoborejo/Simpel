@@ -1,6 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppSettings } from '../../context/AppSettingsContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
+import { academicService } from '../../services/academicService';
+import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
+import { TeachingAssignment } from '../../types/database.types';
 import {
   LayoutDashboard,
   Users,
@@ -23,8 +28,6 @@ import {
   ChevronDown,
   ChevronRight,
   Folder,
-  FileCode2,
-  ListOrdered,
   LifeBuoy,
   HardDrive,
 } from 'lucide-react';
@@ -43,19 +46,87 @@ interface MenuItem {
   badge?: string;
 }
 
+interface SidebarSubjectGroup {
+  subjectId: string;
+  subjectName: string;
+  subjectCode: string;
+  assignments: TeachingAssignment[];
+}
+
 export const Sidebar: React.FC<SidebarProps> = ({
   activeView,
   onNavigate,
   isOpenMobile,
   onCloseMobile,
 }) => {
-  const { activeRole, logout } = useAuth();
+  const { user, activeRole, logout } = useAuth();
   const { logoUrl, settings } = useAppSettings();
-  const [openSubjects, setOpenSubjects] = useState<Record<string, boolean>>({
-    bi: true,
-    ipas: false,
-  });
+  const { selectedSubjectId, setWorkspaceSelection } = useWorkspace();
+  const [openSubjects, setOpenSubjects] = useState<Record<string, boolean>>({});
+  const [teacherSubjectGroups, setTeacherSubjectGroups] = useState<SidebarSubjectGroup[]>([]);
+  const [isLoadingTeacherMenu, setIsLoadingTeacherMenu] = useState<boolean>(false);
   const [isPenugasanExpanded, setIsPenugasanExpanded] = useState<boolean>(true);
+
+  const loadTeacherSubjects = async () => {
+    if (activeRole !== 'guru' || !user) {
+      setTeacherSubjectGroups([]);
+      return;
+    }
+    setIsLoadingTeacherMenu(true);
+    try {
+      const [teacher, assignments] = await Promise.all([
+        academicService.resolveTeacherForUser(user),
+        academicService.getTeachingAssignments(),
+      ]);
+
+      const teacherId = teacher?.id || user.teacherId;
+      const mine = teacherId ? assignments.filter((a) => a.teacher_id === teacherId) : [];
+
+      const groupMap = new Map<string, SidebarSubjectGroup>();
+      for (const asg of mine) {
+        if (!asg.subject || !asg.class) continue;
+        const existing = groupMap.get(asg.subject_id);
+        if (existing) {
+          existing.assignments.push(asg);
+        } else {
+          groupMap.set(asg.subject_id, {
+            subjectId: asg.subject_id,
+            subjectName: asg.subject.name,
+            subjectCode: asg.subject.code,
+            assignments: [asg],
+          });
+        }
+      }
+
+      const groups = Array.from(groupMap.values()).map((g) => ({
+        ...g,
+        assignments: g.assignments.sort((a, b) => (a.class?.level || 0) - (b.class?.level || 0)),
+      }));
+
+      setTeacherSubjectGroups(groups);
+      setOpenSubjects((prev) => {
+        if (groups.length === 0) return {};
+        const hasAnyOpen = groups.some((g) => prev[g.subjectId]);
+        if (hasAnyOpen) return prev;
+        return { [groups[0].subjectId]: true };
+      });
+    } catch (err) {
+      console.warn('Gagal memuat daftar mapel guru pada sidebar:', err);
+    } finally {
+      setIsLoadingTeacherMenu(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadTeacherSubjects();
+  }, [user?.id, user?.teacherId, activeRole]);
+
+  useRealtimeSync(
+    ['simpel_assignments', 'simpel_teachers', 'simpel_classes', 'simpel_subjects', 'simpel_users_cache_v2'],
+    () => {
+      void loadTeacherSubjects();
+    }
+  );
 
   const toggleSubject = (key: string) => {
     setOpenSubjects((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -64,6 +135,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const handleItemClick = (id: string) => {
     onNavigate(id);
     onCloseMobile();
+  };
+
+  const handleSubjectModuleClick = (view: string, asg: TeachingAssignment) => {
+    setWorkspaceSelection({
+      subjectId: asg.subject_id,
+      classId: asg.class_id,
+      classLevel: asg.class?.level || 4,
+      assignmentId: asg.id,
+    });
+    handleItemClick(view);
   };
 
   // Navigasi untuk Admin, Kepala Madrasah, dan Wali Kelas
@@ -269,243 +350,176 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </div>
 
                 <div className="space-y-2">
-                  {/* Cabang Mapel: BAHASA INDONESIA */}
-                  <div className="rounded-xl bg-slate-950/40 border border-slate-800/80 p-2">
-                    <button
-                      onClick={() => toggleSubject('bi')}
-                      className="flex items-center justify-between w-full px-2 py-1.5 text-xs font-bold text-emerald-300 hover:text-emerald-200 transition-colors text-left rounded-md"
-                    >
-                      <div className="flex items-center gap-1.5 truncate">
-                        <Folder className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                        <span className="truncate">BAHASA INDONESIA (Kls 4)</span>
-                      </div>
-                      {openSubjects.bi ? (
-                        <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
-                      ) : (
-                        <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-                      )}
-                    </button>
+                  {isLoadingTeacherMenu ? (
+                    <div className="px-3 py-2 text-[11px] text-slate-400">
+                      Memuat mata pelajaran diampu...
+                    </div>
+                  ) : teacherSubjectGroups.length === 0 ? (
+                    <div className="rounded-xl bg-slate-950/40 border border-slate-800/80 p-3 text-[11px] text-slate-400 leading-relaxed">
+                      <p className="font-semibold text-amber-300 mb-1">Belum Ada Penugasan Mapel</p>
+                      <p>
+                        Mata pelajaran akan muncul otomatis setelah Admin menetapkan penugasan mengajar untuk akun Anda.
+                      </p>
+                    </div>
+                  ) : (
+                    teacherSubjectGroups.map((group) => {
+                      const isExpanded = !!openSubjects[group.subjectId];
+                      const primaryAsg = group.assignments[0];
+                      const classLabel = group.assignments
+                        .map((a) => a.class?.name?.replace(/^Kelas\s+/i, 'Kls ') || `Kls ${a.class?.level || ''}`)
+                        .join(', ');
+                      const scopeConfigs = curriculumWorkspaceService.getLingkupMateriList(
+                        group.subjectId,
+                        primaryAsg.class?.level || 4
+                      );
+                      const isCurrentSubjectSelected = selectedSubjectId === group.subjectId;
 
-                    {openSubjects.bi && (
-                      <div className="pl-3 mt-1.5 space-y-1 border-l-2 border-emerald-800/60 ml-2">
-                        {/* Perangkat Pembelajaran */}
-                        <div className="pt-1">
-                          <div className="flex items-center gap-2 px-2 py-1 text-[11px] font-bold text-emerald-300">
-                            <FolderSync className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                            <span>Perangkat Pembelajaran</span>
-                          </div>
-                          {/* Tree sub-item: CP, TP, ATP, Modul Ajar, LKPD */}
-                          <div className="pl-4 space-y-0.5 text-[11px]">
-                            <button
-                              onClick={() => handleItemClick('cp')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'cp'
-                                  ? 'bg-emerald-600 text-white font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-emerald-400 font-bold font-mono">├─</span>
-                              <span>CP (Capaian)</span>
-                            </button>
+                      return (
+                        <div key={group.subjectId} className="rounded-xl bg-slate-950/40 border border-slate-800/80 p-2">
+                          <button
+                            onClick={() => toggleSubject(group.subjectId)}
+                            className={`flex items-center justify-between w-full px-2 py-1.5 text-xs font-bold transition-colors text-left rounded-md ${
+                              isCurrentSubjectSelected || isExpanded
+                                ? 'text-emerald-300 hover:text-emerald-200'
+                                : 'text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-1.5 truncate">
+                              <Folder className={`w-3.5 h-3.5 shrink-0 ${isExpanded ? 'text-amber-400' : 'text-emerald-400'}`} />
+                              <span className="truncate">
+                                {group.subjectName} ({classLabel})
+                              </span>
+                            </div>
+                            {isExpanded ? (
+                              <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            ) : (
+                              <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            )}
+                          </button>
 
-                            <button
-                              onClick={() => handleItemClick('tp')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'tp'
-                                  ? 'bg-emerald-600 text-white font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-emerald-400 font-bold font-mono">├─</span>
-                              <span>TP (Tujuan)</span>
-                            </button>
+                          {isExpanded && (
+                            <div className="pl-3 mt-1.5 space-y-1 border-l-2 border-emerald-800/60 ml-2">
+                              {group.assignments.length > 1 && (
+                                <div className="flex flex-wrap gap-1 px-2 pb-1">
+                                  {group.assignments.map((asg) => (
+                                    <button
+                                      key={asg.id}
+                                      onClick={() => handleSubjectModuleClick('cp', asg)}
+                                      className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-emerald-800 text-[10px] font-semibold text-emerald-200 transition-colors"
+                                      title={`Buka perangkat untuk ${asg.class?.name}`}
+                                    >
+                                      {asg.class?.name}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
 
-                            <button
-                              onClick={() => handleItemClick('atp')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'atp'
-                                  ? 'bg-emerald-600 text-white font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-emerald-400 font-bold font-mono">├─</span>
-                              <span>ATP (Alur TP)</span>
-                            </button>
+                              {/* Perangkat Pembelajaran */}
+                              <div className="pt-1">
+                                <div className="flex items-center gap-2 px-2 py-1 text-[11px] font-bold text-emerald-300">
+                                  <FolderSync className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                  <span>Perangkat Pembelajaran</span>
+                                </div>
+                                <div className="pl-4 space-y-0.5 text-[11px]">
+                                  {[
+                                    { view: 'cp', prefix: '├─', label: 'CP (Capaian)' },
+                                    { view: 'tp', prefix: '├─', label: 'TP (Tujuan)' },
+                                    { view: 'atp', prefix: '├─', label: 'ATP (Alur TP)' },
+                                    { view: 'modul-ajar', prefix: '├─', label: 'Modul Ajar' },
+                                    { view: 'lkpd', prefix: '└─', label: 'LKPD (Lembar Kerja)' },
+                                  ].map((navItem) => {
+                                    const isSubActive = activeView === navItem.view && isCurrentSubjectSelected;
+                                    return (
+                                      <button
+                                        key={navItem.view}
+                                        onClick={() => handleSubjectModuleClick(navItem.view, primaryAsg)}
+                                        className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
+                                          isSubActive
+                                            ? 'bg-emerald-600 text-white font-bold'
+                                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                                        }`}
+                                      >
+                                        <span className="text-emerald-400 font-bold font-mono">{navItem.prefix}</span>
+                                        <span className="truncate">{navItem.label}</span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
 
-                            <button
-                              onClick={() => handleItemClick('modul-ajar')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'modul-ajar'
-                                  ? 'bg-emerald-600 text-white font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-emerald-400 font-bold font-mono">├─</span>
-                              <span>Modul Ajar (Deep Learning)</span>
-                            </button>
+                              {/* Perangkat Evaluasi per Lingkup Materi */}
+                              <div className="pt-2">
+                                <div className="flex items-center gap-2 px-2 py-1 text-[11px] font-bold text-amber-300">
+                                  <Award className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                  <span>Perangkat Evaluasi</span>
+                                </div>
+                                <div className="pl-4 space-y-0.5 text-[11px]">
+                                  {scopeConfigs.map((sc, sIdx) => {
+                                    const viewMap: Record<string, string> = {
+                                      LM1: 'eval-lm1',
+                                      LM2: 'eval-lm2',
+                                      STS: 'eval-sts',
+                                      LM3: 'eval-lm3',
+                                      LM4: 'eval-lm4',
+                                      SAS: 'eval-sas',
+                                    };
+                                    const targetView = viewMap[sc.scope_key] || 'kisi-kisi';
+                                    const isSubActive = activeView === targetView && isCurrentSubjectSelected;
+                                    const isLast = sIdx === scopeConfigs.length - 1;
 
-                            <button
-                              onClick={() => handleItemClick('lkpd')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'lkpd'
-                                  ? 'bg-emerald-600 text-white font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-emerald-400 font-bold font-mono">└─</span>
-                              <span>LKPD (Lembar Kerja)</span>
-                            </button>
-                          </div>
+                                    return (
+                                      <button
+                                        key={sc.id}
+                                        onClick={() => handleSubjectModuleClick(targetView, primaryAsg)}
+                                        className={`flex items-center justify-between w-full px-2 py-1 rounded transition-colors text-left ${
+                                          isSubActive
+                                            ? 'bg-amber-500 text-slate-900 font-bold'
+                                            : sc.is_special_summative
+                                            ? 'text-amber-300 hover:bg-amber-950/40 hover:text-amber-200'
+                                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                                        }`}
+                                      >
+                                        <div className="flex items-center gap-2 truncate">
+                                          <span className="text-amber-400 font-bold font-mono">
+                                            {isLast ? '└─' : '├─'}
+                                          </span>
+                                          <span className="truncate">
+                                            {sc.is_special_summative ? `${sc.code}` : `${sc.code}: ${sc.title}`}
+                                          </span>
+                                        </div>
+                                        {sc.is_special_summative && (
+                                          <span className="px-1 text-[9px] font-extrabold rounded bg-amber-400/20 text-amber-300 border border-amber-400/40 shrink-0">
+                                            {sc.code}
+                                          </span>
+                                        )}
+                                      </button>
+                                    );
+                                  })}
+
+                                  <button
+                                    onClick={() => handleSubjectModuleClick('leger-nilai', primaryAsg)}
+                                    className={`flex items-center justify-between w-full px-2 py-1 rounded transition-colors text-left mt-1 border-t border-slate-800/60 pt-1.5 ${
+                                      activeView === 'leger-nilai' && isCurrentSubjectSelected
+                                        ? 'bg-emerald-600 text-white font-bold shadow-xs'
+                                        : 'text-emerald-300 hover:bg-slate-800 hover:text-white'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 truncate">
+                                      <span className="text-emerald-400 font-bold font-mono">└─</span>
+                                      <span className="font-bold truncate">Leger Nilai & Rapor</span>
+                                    </div>
+                                    <span className="px-1 text-[9px] font-bold rounded bg-emerald-400/20 text-emerald-300 border border-emerald-400/40 shrink-0">
+                                      Leger
+                                    </span>
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
-
-                        {/* Perangkat Evaluasi per Lingkup Materi (LM) & STS/SAS */}
-                        <div className="pt-2">
-                          <div className="flex items-center gap-2 px-2 py-1 text-[11px] font-bold text-amber-300">
-                            <Award className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                            <span>Perangkat Evaluasi (per LM)</span>
-                          </div>
-                          {/* Tree sub-item: LM 1 s.d. LM 4 serta STS dan SAS */}
-                          <div className="pl-4 space-y-0.5 text-[11px]">
-                            <button
-                              onClick={() => handleItemClick('eval-lm1')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'eval-lm1'
-                                  ? 'bg-amber-500 text-slate-900 font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-amber-400 font-bold font-mono">├─</span>
-                              <span>LM 1: Sudah Besar</span>
-                            </button>
-
-                            <button
-                              onClick={() => handleItemClick('eval-lm2')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'eval-lm2'
-                                  ? 'bg-amber-500 text-slate-900 font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-amber-400 font-bold font-mono">├─</span>
-                              <span>LM 2: Di Bawah Atap</span>
-                            </button>
-
-                            <button
-                              onClick={() => handleItemClick('eval-sts')}
-                              className={`flex items-center justify-between w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'eval-sts'
-                                  ? 'bg-amber-400 text-slate-900 font-extrabold shadow-xs'
-                                  : 'text-amber-300 hover:bg-amber-950/40 hover:text-amber-200'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="text-amber-400 font-bold font-mono">├─</span>
-                                <span className="font-bold">⭐ STS Ganjil</span>
-                              </div>
-                              <span className="px-1 text-[9px] font-extrabold rounded bg-amber-400/20 text-amber-300 border border-amber-400/40">
-                                STS
-                              </span>
-                            </button>
-
-                            <button
-                              onClick={() => handleItemClick('eval-lm3')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'eval-lm3'
-                                  ? 'bg-amber-500 text-slate-900 font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-amber-400 font-bold font-mono">├─</span>
-                              <span>LM 3: Lihat Sekitar</span>
-                            </button>
-
-                            <button
-                              onClick={() => handleItemClick('eval-lm4')}
-                              className={`flex items-center gap-2 w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'eval-lm4'
-                                  ? 'bg-amber-500 text-slate-900 font-bold'
-                                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <span className="text-amber-400 font-bold font-mono">├─</span>
-                              <span>LM 4: Meliuk Menerjang</span>
-                            </button>
-
-                            <button
-                              onClick={() => handleItemClick('eval-sas')}
-                              className={`flex items-center justify-between w-full px-2 py-1 rounded transition-colors text-left ${
-                                activeView === 'eval-sas'
-                                  ? 'bg-amber-400 text-slate-900 font-extrabold shadow-xs'
-                                  : 'text-amber-300 hover:bg-amber-950/40 hover:text-amber-200'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="text-amber-400 font-bold font-mono">└─</span>
-                                <span className="font-bold">🏆 SAS Ganjil</span>
-                              </div>
-                              <span className="px-1 text-[9px] font-extrabold rounded bg-amber-400/20 text-amber-300 border border-amber-400/40">
-                                SAS
-                              </span>
-                            </button>
-
-                            <button
-                              onClick={() => handleItemClick('leger-nilai')}
-                              className={`flex items-center justify-between w-full px-2 py-1 rounded transition-colors text-left mt-1 border-t border-slate-800/60 pt-1.5 ${
-                                activeView === 'leger-nilai'
-                                  ? 'bg-emerald-600 text-white font-bold shadow-xs'
-                                  : 'text-emerald-300 hover:bg-slate-800 hover:text-white'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="text-emerald-400 font-bold font-mono">📊</span>
-                                <span className="font-bold">Leger Nilai TP/LM & Rapor</span>
-                              </div>
-                              <span className="px-1 text-[9px] font-bold rounded bg-emerald-400/20 text-emerald-300 border border-emerald-400/40">
-                                Leger
-                              </span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Cabang Mapel: IPAS */}
-                  <div className="rounded-xl bg-slate-950/40 border border-slate-800/80 p-2">
-                    <button
-                      onClick={() => toggleSubject('ipas')}
-                      className="flex items-center justify-between w-full px-2 py-1.5 text-xs font-bold text-slate-300 hover:text-white transition-colors text-left rounded-md"
-                    >
-                      <div className="flex items-center gap-1.5 truncate">
-                        <Folder className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span className="truncate">IPAS (Kelas 4)</span>
-                      </div>
-                      {openSubjects.ipas ? (
-                        <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
-                      ) : (
-                        <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-                      )}
-                    </button>
-
-                    {openSubjects.ipas && (
-                      <div className="pl-3 mt-1.5 space-y-1 border-l-2 border-emerald-800/60 ml-2">
-                        <button
-                          onClick={() => handleItemClick('cp')}
-                          className="flex items-center gap-2 w-full px-2 py-1 text-[11px] font-semibold text-slate-300 hover:bg-slate-800 hover:text-white rounded"
-                        >
-                          <FolderSync className="w-3 h-3 text-emerald-400" />
-                          <span>Perangkat Pembelajaran IPAS</span>
-                        </button>
-                        <button
-                          onClick={() => handleItemClick('eval-sts')}
-                          className="flex items-center gap-2 w-full px-2 py-1 text-[11px] font-semibold text-amber-300 hover:bg-slate-800 hover:text-white rounded"
-                        >
-                          <Award className="w-3 h-3 text-amber-400" />
-                          <span>Evaluasi: LM 1, LM 2, STS & SAS</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
 

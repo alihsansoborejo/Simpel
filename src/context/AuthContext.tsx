@@ -47,11 +47,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (isSupabaseConfigured) {
           const { data: { session } } = await supabase.auth.getSession();
           if (session?.user && mounted) {
-            const fullUser = await fetchFullUserAccount(session.user.id, session.user.email);
-            setUser(fullUser);
-            setActiveRole(fullUser.activeRole);
+            try {
+              const fullUser = await fetchFullUserAccount(session.user.id, session.user.email);
+              setUser(fullUser);
+              setActiveRole(fullUser.activeRole);
+            } catch (supaErr) {
+              const local = getPersistedSession();
+              if (local && mounted) {
+                setUser(local);
+                setActiveRole(local.activeRole);
+              } else {
+                throw supaErr;
+              }
+            }
           } else if (!session) {
-            // Jika tidak ada session supabase tapi ada persisted local, bersihkan
             const local = getPersistedSession();
             if (local && mounted) {
               setUser(local);
@@ -89,7 +98,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               setUser(fullUser);
               setActiveRole(fullUser.activeRole);
             } catch (err: any) {
-              setError(err.message);
+              const local = getPersistedSession();
+              if (!local) {
+                setError(err.message);
+              }
             }
           } else if (event === 'SIGNED_OUT') {
             setUser(null);
@@ -167,40 +179,51 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!user) return;
     try {
       if (isSupabaseConfigured) {
-        const refreshed = await fetchFullUserAccount(user.id, user.email);
-        setUser(refreshed);
-        return;
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user?.id && session.user.id === user.id) {
+          const refreshed = await fetchFullUserAccount(user.id, user.email);
+          setUser(refreshed);
+          return;
+        }
       }
 
       const latestUsers = getDemoUsers();
       const matched = latestUsers.find(
         (u) => u.id === user.id || u.email.toLowerCase() === user.email.toLowerCase()
       );
-      if (!matched) return;
 
-      const teacherId = matched.teacher_info?.id || user.teacherId || null;
-      let homeroomClassId: string | null = null;
-      if (teacherId) {
-        try {
-          const classes = await academicService.getClasses();
-          const cls = classes.find((c) => c.homeroom_teacher_id === teacherId);
-          if (cls) homeroomClassId = cls.id;
-        } catch {
-          // ignore
-        }
-      }
+      const resolvedName = matched?.full_name || user.profile.full_name;
+      const resolvedTeacher = await academicService.resolveTeacherForUser({
+        id: matched?.id || user.id,
+        email: matched?.email || user.email,
+        profile: { full_name: resolvedName },
+        teacherId: matched?.teacher_info?.id || user.teacherId || null,
+      });
 
-      const nextRoles = matched.roles.length > 0 ? matched.roles : user.roles;
+      const teacherId = resolvedTeacher?.id || matched?.teacher_info?.id || user.teacherId || null;
+      const hrClass = await academicService.resolveHomeroomClassForUser(
+        {
+          id: matched?.id || user.id,
+          email: matched?.email || user.email,
+          profile: { full_name: resolvedName },
+          teacherId,
+          homeroomClassId: user.homeroomClassId,
+        },
+        resolvedTeacher
+      );
+      const homeroomClassId = hrClass?.id || null;
+
+      const nextRoles = matched && matched.roles.length > 0 ? matched.roles : user.roles;
       const nextActiveRole = nextRoles.includes(activeRole) ? activeRole : nextRoles[0];
 
       const updated: AuthUser = {
         ...user,
         profile: {
           ...user.profile,
-          full_name: matched.full_name,
-          phone_number: matched.phone_number,
-          avatar_url: matched.avatar_url,
-          is_active: matched.is_active,
+          full_name: resolvedName,
+          phone_number: matched ? matched.phone_number : user.profile.phone_number,
+          avatar_url: matched ? matched.avatar_url : user.profile.avatar_url,
+          is_active: matched ? matched.is_active : user.profile.is_active,
         },
         roles: nextRoles,
         activeRole: nextActiveRole,
@@ -216,9 +239,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  useRealtimeSync(['simpel_users_cache_v2', 'simpel_teachers', 'simpel_classes'], () => {
-    void refreshProfile();
-  });
+  useRealtimeSync(
+    ['simpel_users_cache_v2', 'simpel_teachers', 'simpel_classes', 'simpel_homeroom_assignments', 'simpel_assignments'],
+    () => {
+      void refreshProfile();
+    }
+  );
 
   const availableRoles = useMemo(() => user?.roles || [], [user]);
 

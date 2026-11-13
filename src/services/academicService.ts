@@ -59,6 +59,256 @@ function isUuid(value?: string | null): boolean {
   return typeof value === 'string' && UUID_REGEX.test(value);
 }
 
+const USERS_SYNC_STORAGE_KEY = 'simpel_users_cache_v2';
+
+export function cleanTeacherIdentifier(value?: string | null): string | null {
+  if (!value) return null;
+  const trimmed = String(value).trim();
+  if (
+    !trimmed ||
+    /^[-–—_.0/]+$/.test(trimmed) ||
+    /^(non-?pns|tidak ada|belum ada|null|na|n\/a)$/i.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+export function normalizePersonName(name?: string | null): string {
+  if (!name) return '';
+  return String(name).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function stripPersonTitles(name?: string | null): string {
+  if (!name) return '';
+  return String(name)
+    .toLowerCase()
+    .replace(/^(ust\.?|ustadz|ustadzah|h\.?|hj\.?|drs\.?|dr\.?|kh\.?)\s+/gi, '')
+    .replace(/,\s*(s\.?pd\.?i?|s\.?pd|m\.?pd\.?i?|m\.?pd|s\.?ag|s\.?kom|s\.?e|m\.?ag|s\.?si|gr\.?).*$/gi, '')
+    .replace(/[.,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function generateTeacherUuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+let isReconcilingTeachers = false;
+
+function reconcileTeachersWithSyncedAccounts(baseTeachers: Teacher[]): Teacher[] {
+  if (isReconcilingTeachers || typeof window === 'undefined') return baseTeachers;
+  isReconcilingTeachers = true;
+
+  try {
+    const resultTeachers: Teacher[] = baseTeachers.map((t) => ({
+      ...t,
+      nip: cleanTeacherIdentifier(t.nip),
+      nuptk: cleanTeacherIdentifier(t.nuptk),
+      phone_number: cleanTeacherIdentifier(t.phone_number),
+    }));
+
+    let teachersChanged = resultTeachers.some(
+      (t, idx) =>
+        t.nip !== baseTeachers[idx].nip ||
+        t.nuptk !== baseTeachers[idx].nuptk ||
+        t.phone_number !== baseTeachers[idx].phone_number
+    );
+
+    const rawUsers = localStorage.getItem(USERS_SYNC_STORAGE_KEY);
+    if (!rawUsers) {
+      if (teachersChanged) {
+        setLocal(STORAGE_KEYS.TEACHERS, resultTeachers);
+      }
+      return resultTeachers;
+    }
+
+    const parsedUsers = JSON.parse(rawUsers);
+    if (!Array.isArray(parsedUsers) || parsedUsers.length === 0) {
+      if (teachersChanged) {
+        setLocal(STORAGE_KEYS.TEACHERS, resultTeachers);
+      }
+      return resultTeachers;
+    }
+
+    let usersChanged = false;
+    const claimedTeacherIds = new Set<string>();
+    const newlyCreatedForCloud: Teacher[] = [];
+    const now = new Date().toISOString();
+
+    const updatedUsers = parsedUsers.map((u: any) => {
+      const roles: string[] = Array.isArray(u.roles) ? u.roles : [];
+      const email = String(u.email || '').trim().toLowerCase();
+      const normName = normalizePersonName(u.full_name);
+
+      if (!normName || u.teacher_detached === true) {
+        return u;
+      }
+
+      const isEducatorAccount =
+        roles.some((r) => ['guru', 'wali_kelas', 'kepala_madrasah'].includes(r)) ||
+        (email !== 'alihsansoborejo@gmail.com' && !!u.specialization);
+
+      if (!isEducatorAccount) {
+        return u;
+      }
+
+      const cleanNip = cleanTeacherIdentifier(u.nip);
+      const cleanNuptk = cleanTeacherIdentifier(u.nuptk);
+      const cleanPhone = cleanTeacherIdentifier(u.phone_number);
+
+      // Cari teacher yang valid dan belum diklaim oleh akun lain
+      let matchedIndex = -1;
+
+      if (u.teacher_info?.id && !claimedTeacherIds.has(u.teacher_info.id)) {
+        const idxByLink = resultTeachers.findIndex(
+          (t) => t.id === u.teacher_info.id && normalizePersonName(t.full_name) === normName
+        );
+        if (idxByLink !== -1) matchedIndex = idxByLink;
+      }
+
+      if (matchedIndex === -1) {
+        matchedIndex = resultTeachers.findIndex(
+          (t) => !claimedTeacherIds.has(t.id) && t.user_id === u.id && normalizePersonName(t.full_name) === normName
+        );
+      }
+
+      if (matchedIndex === -1 && cleanNip) {
+        matchedIndex = resultTeachers.findIndex(
+          (t) => !claimedTeacherIds.has(t.id) && cleanTeacherIdentifier(t.nip) === cleanNip
+        );
+      }
+
+      if (matchedIndex === -1) {
+        matchedIndex = resultTeachers.findIndex(
+          (t) => !claimedTeacherIds.has(t.id) && normalizePersonName(t.full_name) === normName
+        );
+      }
+
+      let linkedTeacher: Teacher;
+
+      if (matchedIndex !== -1) {
+        const existing = resultTeachers[matchedIndex];
+        claimedTeacherIds.add(existing.id);
+
+        const nextTeacher: Teacher = {
+          ...existing,
+          user_id: existing.user_id || u.id,
+          full_name: existing.full_name || String(u.full_name).trim(),
+          title_prefix: existing.title_prefix ?? (u.title_prefix || null),
+          title_suffix: existing.title_suffix ?? (u.title_suffix || null),
+          nip: cleanTeacherIdentifier(existing.nip) ?? cleanNip,
+          nuptk: cleanTeacherIdentifier(existing.nuptk) ?? cleanNuptk,
+          gender: existing.gender || (u.gender === 'P' ? 'P' : 'L'),
+          phone_number: cleanTeacherIdentifier(existing.phone_number) ?? cleanPhone,
+          specialization:
+            existing.specialization ||
+            u.specialization ||
+            (roles.includes('kepala_madrasah') ? 'Kepala Madrasah' : 'Guru Pengampu'),
+          is_active: existing.is_active ?? (u.is_active ?? true),
+        };
+
+        if (
+          nextTeacher.nip !== existing.nip ||
+          nextTeacher.nuptk !== existing.nuptk ||
+          nextTeacher.phone_number !== existing.phone_number ||
+          nextTeacher.user_id !== existing.user_id ||
+          nextTeacher.title_suffix !== existing.title_suffix ||
+          nextTeacher.specialization !== existing.specialization
+        ) {
+          resultTeachers[matchedIndex] = nextTeacher;
+          teachersChanged = true;
+        }
+        linkedTeacher = nextTeacher;
+      } else {
+        linkedTeacher = {
+          id: generateTeacherUuid(),
+          user_id: u.id,
+          full_name: String(u.full_name).trim(),
+          title_prefix: u.title_prefix || null,
+          title_suffix: u.title_suffix || null,
+          nip: cleanNip,
+          nuptk: cleanNuptk,
+          gender: u.gender === 'P' ? 'P' : 'L',
+          phone_number: cleanPhone,
+          specialization:
+            u.specialization ||
+            (roles.includes('kepala_madrasah') ? 'Kepala Madrasah' : 'Guru Pengampu'),
+          is_active: u.is_active ?? true,
+          created_at: u.created_at || now,
+          updated_at: now,
+        };
+        claimedTeacherIds.add(linkedTeacher.id);
+        resultTeachers.push(linkedTeacher);
+        newlyCreatedForCloud.push(linkedTeacher);
+        teachersChanged = true;
+      }
+
+      const needsUserUpdate =
+        u.teacher_info?.id !== linkedTeacher.id ||
+        u.teacher_info?.nip !== linkedTeacher.nip ||
+        u.teacher_info?.specialization !== linkedTeacher.specialization ||
+        u.nip !== cleanNip ||
+        u.nuptk !== cleanNuptk;
+
+      if (needsUserUpdate) {
+        usersChanged = true;
+        return {
+          ...u,
+          nip: cleanNip,
+          nuptk: cleanNuptk,
+          phone_number: cleanPhone ?? u.phone_number ?? null,
+          teacher_info: {
+            id: linkedTeacher.id,
+            nip: linkedTeacher.nip,
+            specialization: linkedTeacher.specialization,
+          },
+        };
+      }
+
+      return u;
+    });
+
+    const sorted = [...resultTeachers].sort((a, b) => a.full_name.localeCompare(b.full_name, 'id'));
+
+    if (teachersChanged) {
+      setLocal(STORAGE_KEYS.TEACHERS, sorted);
+    }
+    if (usersChanged) {
+      setLocal(USERS_SYNC_STORAGE_KEY, updatedUsers);
+    }
+
+    if (isSupabaseConfigured && newlyCreatedForCloud.length > 0) {
+      for (const nt of newlyCreatedForCloud) {
+        const cloudRow = {
+          ...nt,
+          user_id: isUuid(nt.user_id) ? nt.user_id : null,
+        };
+        void supabase
+          .from('teachers')
+          .upsert(cloudRow, { onConflict: 'id' })
+          .then(({ error }) => {
+            if (error) console.warn('Background sync teacher ke Supabase dilewati:', error.message);
+          });
+      }
+    }
+
+    return sorted;
+  } catch (err) {
+    console.warn('Reconcile teachers & accounts error:', err);
+    return baseTeachers;
+  } finally {
+    isReconcilingTeachers = false;
+  }
+}
+
 let lastCloudSyncError: string | null = null;
 
 export const academicService = {
@@ -68,15 +318,27 @@ export const academicService = {
 
   // === SISTEM PENGATURAN ===
   async getSettings(): Promise<SystemSettings> {
+    const localSettings = getLocal<SystemSettings | null>(STORAGE_KEYS.SETTINGS, null);
     if (isSupabaseConfigured) {
       try {
         const { data, error } = await supabase.from('system_settings').select('*').limit(1).maybeSingle();
-        if (!error && data) return data as SystemSettings;
+        if (!error && data) {
+          const remoteSettings = data as SystemSettings;
+          if (
+            localSettings &&
+            localSettings.updated_at &&
+            remoteSettings.updated_at &&
+            Date.parse(localSettings.updated_at) > Date.parse(remoteSettings.updated_at)
+          ) {
+            return localSettings;
+          }
+          return remoteSettings;
+        }
       } catch (err) {
         console.warn('Supabase getSettings fallback:', err);
       }
     }
-    return getLocal<SystemSettings>(STORAGE_KEYS.SETTINGS, DEMO_SYSTEM_SETTINGS);
+    return localSettings || DEMO_SYSTEM_SETTINGS;
   },
 
   async updateSettings(settings: Partial<SystemSettings>): Promise<SystemSettings> {
@@ -380,12 +642,14 @@ export const academicService = {
           const remoteTeachers = data as Teacher[];
           const merged: Teacher[] = [...remoteTeachers];
           const seenIds = new Set(remoteTeachers.map((t) => t.id));
-          const seenNames = new Set(remoteTeachers.map((t) => t.full_name.trim().toLowerCase()));
-          const seenNips = new Set(remoteTeachers.map((t) => t.nip?.trim()).filter(Boolean) as string[]);
+          const seenNames = new Set(remoteTeachers.map((t) => normalizePersonName(t.full_name)));
+          const seenNips = new Set(
+            remoteTeachers.map((t) => cleanTeacherIdentifier(t.nip)).filter(Boolean) as string[]
+          );
 
           for (const lt of localTeachers) {
-            const normName = lt.full_name.trim().toLowerCase();
-            const normNip = lt.nip?.trim() || '';
+            const normName = normalizePersonName(lt.full_name);
+            const normNip = cleanTeacherIdentifier(lt.nip);
             if (seenIds.has(lt.id) || (normNip && seenNips.has(normNip)) || seenNames.has(normName)) {
               continue;
             }
@@ -395,25 +659,27 @@ export const academicService = {
             if (normNip) seenNips.add(normNip);
           }
 
-          return merged.sort((a, b) => a.full_name.localeCompare(b.full_name, 'id'));
+          return reconcileTeachersWithSyncedAccounts(merged);
         }
       } catch (err) {
         console.warn('Supabase getTeachers fallback:', err);
       }
     }
-    return localTeachers;
+    return reconcileTeachersWithSyncedAccounts(localTeachers);
   },
 
   async createTeacher(payload: Omit<Teacher, 'id' | 'created_at' | 'updated_at'>): Promise<Teacher> {
-    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tch-${Date.now()}`;
+    const id = generateTeacherUuid();
     const now = new Date().toISOString();
-    const cleanNip = payload.nip?.trim() || null;
-    const cleanNuptk = payload.nuptk?.trim() || null;
+    const cleanNip = cleanTeacherIdentifier(payload.nip);
+    const cleanNuptk = cleanTeacherIdentifier(payload.nuptk);
+    const cleanPhone = cleanTeacherIdentifier(payload.phone_number);
 
     let savedTeacher: Teacher = {
       ...payload,
       nip: cleanNip,
       nuptk: cleanNuptk,
+      phone_number: cleanPhone,
       id,
       created_at: now,
       updated_at: now,
@@ -456,8 +722,9 @@ export const academicService = {
 
     const cleanPayload: Partial<Teacher> = {
       ...payload,
-      ...(payload.nip !== undefined ? { nip: payload.nip?.trim() || null } : {}),
-      ...(payload.nuptk !== undefined ? { nuptk: payload.nuptk?.trim() || null } : {}),
+      ...(payload.nip !== undefined ? { nip: cleanTeacherIdentifier(payload.nip) } : {}),
+      ...(payload.nuptk !== undefined ? { nuptk: cleanTeacherIdentifier(payload.nuptk) } : {}),
+      ...(payload.phone_number !== undefined ? { phone_number: cleanTeacherIdentifier(payload.phone_number) } : {}),
     };
 
     const updatedTeacher: Teacher = {
@@ -484,6 +751,44 @@ export const academicService = {
       ? localTeachers.map((t) => (t.id === id ? updatedTeacher : t))
       : [updatedTeacher, ...localTeachers];
     setLocal(STORAGE_KEYS.TEACHERS, updated);
+
+    // Sinkronkan balik perubahan data guru ke akun tertaut di Manajemen Akun
+    try {
+      const rawUsers = localStorage.getItem(USERS_SYNC_STORAGE_KEY);
+      if (rawUsers) {
+        const parsedUsers = JSON.parse(rawUsers);
+        if (Array.isArray(parsedUsers)) {
+          let touched = false;
+          const nextUsers = parsedUsers.map((u: any) => {
+            if (u.teacher_info?.id === id || (updatedTeacher.user_id && u.id === updatedTeacher.user_id)) {
+              touched = true;
+              return {
+                ...u,
+                full_name: updatedTeacher.full_name,
+                title_prefix: updatedTeacher.title_prefix,
+                title_suffix: updatedTeacher.title_suffix,
+                nip: updatedTeacher.nip,
+                nuptk: updatedTeacher.nuptk,
+                gender: updatedTeacher.gender,
+                phone_number: updatedTeacher.phone_number,
+                specialization: updatedTeacher.specialization,
+                is_active: updatedTeacher.is_active,
+                teacher_info: {
+                  id: updatedTeacher.id,
+                  nip: updatedTeacher.nip,
+                  specialization: updatedTeacher.specialization,
+                },
+              };
+            }
+            return u;
+          });
+          if (touched) setLocal(USERS_SYNC_STORAGE_KEY, nextUsers);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     return updatedTeacher;
   },
 
@@ -496,23 +801,159 @@ export const academicService = {
       }
     }
     const localTeachers = getLocal<Teacher[]>(STORAGE_KEYS.TEACHERS, DEMO_TEACHERS);
+    const target = localTeachers.find((t) => t.id === id);
     const updated = localTeachers.filter((t) => t.id !== id);
     setLocal(STORAGE_KEYS.TEACHERS, updated);
+
+    // Putuskan tautan di akun agar tidak otomatis dibuat ulang sampai admin mengaktifkan ulang
+    try {
+      const rawUsers = localStorage.getItem(USERS_SYNC_STORAGE_KEY);
+      if (rawUsers) {
+        const parsedUsers = JSON.parse(rawUsers);
+        if (Array.isArray(parsedUsers)) {
+          let touched = false;
+          const nextUsers = parsedUsers.map((u: any) => {
+            if (u.teacher_info?.id === id || (target?.user_id && u.id === target.user_id)) {
+              touched = true;
+              return { ...u, teacher_info: null, teacher_detached: true };
+            }
+            return u;
+          });
+          if (touched) setLocal(USERS_SYNC_STORAGE_KEY, nextUsers);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  },
+
+  // === RESOLUSI IDENTITAS GURU & WALI KELAS ===
+  async resolveTeacherForUser(
+    user?: {
+      id?: string;
+      email?: string;
+      profile?: { full_name?: string };
+      teacherId?: string | null;
+    } | null
+  ): Promise<Teacher | null> {
+    if (!user) return null;
+    const teachers = await this.getTeachers();
+    if (teachers.length === 0) return null;
+
+    if (user.teacherId) {
+      const byDirectId = teachers.find((t) => t.id === user.teacherId);
+      if (byDirectId) return byDirectId;
+    }
+
+    if (user.id) {
+      const byUserId = teachers.find((t) => t.user_id && t.user_id === user.id);
+      if (byUserId) return byUserId;
+    }
+
+    try {
+      const rawUsers = localStorage.getItem(USERS_SYNC_STORAGE_KEY);
+      if (rawUsers) {
+        const parsedUsers = JSON.parse(rawUsers);
+        if (Array.isArray(parsedUsers)) {
+          const emailLower = String(user.email || '').trim().toLowerCase();
+          const matchedUser = parsedUsers.find(
+            (u: any) =>
+              (user.id && u.id === user.id) ||
+              (emailLower && String(u.email || '').trim().toLowerCase() === emailLower)
+          );
+          if (matchedUser?.teacher_info?.id) {
+            const byUserCacheId = teachers.find((t) => t.id === matchedUser.teacher_info.id);
+            if (byUserCacheId) return byUserCacheId;
+          }
+          if (matchedUser?.full_name) {
+            const normCached = normalizePersonName(matchedUser.full_name);
+            const byCachedName = teachers.find((t) => normalizePersonName(t.full_name) === normCached);
+            if (byCachedName) return byCachedName;
+          }
+        }
+      }
+    } catch {
+      // ignore parse error
+    }
+
+    const normFull = normalizePersonName(user.profile?.full_name);
+    if (normFull) {
+      const byExactName = teachers.find((t) => normalizePersonName(t.full_name) === normFull);
+      if (byExactName) return byExactName;
+
+      const strippedTarget = stripPersonTitles(user.profile?.full_name);
+      if (strippedTarget) {
+        const byStripped = teachers.find(
+          (t) => stripPersonTitles(t.full_name) === strippedTarget
+        );
+        if (byStripped) return byStripped;
+      }
+    }
+
+    return null;
+  },
+
+  async resolveHomeroomClassForUser(
+    user?: {
+      id?: string;
+      email?: string;
+      profile?: { full_name?: string };
+      teacherId?: string | null;
+      homeroomClassId?: string | null;
+    } | null,
+    resolvedTeacher?: Teacher | null
+  ): Promise<ClassRoom | null> {
+    if (!user) return null;
+    const [classes, homerooms] = await Promise.all([
+      this.getClasses(),
+      this.getHomeroomAssignments(),
+    ]);
+
+    const teacher = resolvedTeacher ?? (await this.resolveTeacherForUser(user));
+    if (teacher) {
+      const hr = homerooms.find((h) => h.teacher_id === teacher.id);
+      if (hr) {
+        const matched = classes.find((c) => c.id === hr.class_id);
+        if (matched) return matched;
+      }
+      const clsByHr = classes.find((c) => c.homeroom_teacher_id === teacher.id);
+      if (clsByHr) return clsByHr;
+    }
+
+    if (user.homeroomClassId) {
+      const byId = classes.find((c) => c.id === user.homeroomClassId);
+      if (byId) return byId;
+    }
+
+    return null;
   },
 
   // === PENUGASAN WALI KELAS (HOMEROOM) ===
   async getHomeroomAssignments(): Promise<HomeroomAssignment[]> {
+    const localList = getLocal<HomeroomAssignment[]>(
+      STORAGE_KEYS.HOMEROOM_ASSIGNMENTS,
+      DEMO_HOMEROOM_ASSIGNMENTS
+    );
     if (isSupabaseConfigured) {
       try {
         const { data, error } = await supabase
           .from('homeroom_assignments')
           .select('*, teacher:teachers(*), class:classes(*)');
-        if (!error && data && data.length > 0) return data as HomeroomAssignment[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const remoteList = data as HomeroomAssignment[];
+          const merged = [...localList];
+          for (const r of remoteList) {
+            if (!merged.some((l) => l.class_id === r.class_id)) {
+              merged.push(r);
+            }
+          }
+          return merged;
+        }
       } catch (err) {
         console.warn('Supabase getHomeroomAssignments fallback:', err);
       }
     }
-    return getLocal<HomeroomAssignment[]>(STORAGE_KEYS.HOMEROOM_ASSIGNMENTS, DEMO_HOMEROOM_ASSIGNMENTS);
+    return localList;
   },
 
   async assignHomeroomTeacher(
@@ -547,7 +988,7 @@ export const academicService = {
       current.push(result);
     }
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(classId) && isUuid(teacherId) && isUuid(academicYearId)) {
       try {
         await supabase.from('homeroom_assignments').upsert(
           {
@@ -571,7 +1012,7 @@ export const academicService = {
     const updated = current.filter((h) => h.class_id !== classId);
     setLocal(STORAGE_KEYS.HOMEROOM_ASSIGNMENTS, updated);
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(classId)) {
       try {
         await supabase.from('homeroom_assignments').delete().eq('class_id', classId);
       } catch (err) {
@@ -616,17 +1057,56 @@ export const academicService = {
 
   // === PENUGASAN GURU MENGAJAR ===
   async getTeachingAssignments(): Promise<TeachingAssignment[]> {
+    const localRaw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEYS.ASSIGNMENTS) : null;
+    const localAssignments = getLocal<TeachingAssignment[]>(
+      STORAGE_KEYS.ASSIGNMENTS,
+      DEMO_TEACHING_ASSIGNMENTS
+    );
+
+    let baseAssignments: TeachingAssignment[] = [...localAssignments];
+
     if (isSupabaseConfigured) {
       try {
         const { data, error } = await supabase
           .from('teaching_assignments')
           .select('*, teacher:teachers(*), class:classes(*), subject:subjects(*)');
-        if (!error && data && data.length > 0) return data as TeachingAssignment[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const remoteAssignments = data as TeachingAssignment[];
+          if (localRaw === null) {
+            baseAssignments = remoteAssignments;
+          } else {
+            const seenPairs = new Set(
+              baseAssignments.map((a) => `${a.class_id}_${a.subject_id}`)
+            );
+            for (const ra of remoteAssignments) {
+              const pairKey = `${ra.class_id}_${ra.subject_id}`;
+              if (!seenPairs.has(pairKey)) {
+                baseAssignments.push(ra);
+                seenPairs.add(pairKey);
+              }
+            }
+          }
+        }
       } catch (err) {
         console.warn('Supabase getTeachingAssignments fallback:', err);
       }
     }
-    return getLocal<TeachingAssignment[]>(STORAGE_KEYS.ASSIGNMENTS, DEMO_TEACHING_ASSIGNMENTS);
+
+    if (baseAssignments.length === 0) return [];
+
+    // Selalu hidrasi relasi teacher, class, dan subject dari data master terbaru
+    const [teachers, classes, subjects] = await Promise.all([
+      this.getTeachers(),
+      this.getClasses(),
+      this.getSubjects(),
+    ]);
+
+    return baseAssignments.map((a) => ({
+      ...a,
+      teacher: teachers.find((t) => t.id === a.teacher_id) || a.teacher,
+      class: classes.find((c) => c.id === a.class_id) || a.class,
+      subject: subjects.find((s) => s.id === a.subject_id) || a.subject,
+    }));
   },
 
   async createTeachingAssignment(
@@ -645,7 +1125,14 @@ export const academicService = {
       subject: subjects.find((s) => s.id === payload.subject_id),
     };
 
-    if (isSupabaseConfigured) {
+    if (
+      isSupabaseConfigured &&
+      isUuid(payload.class_id) &&
+      isUuid(payload.subject_id) &&
+      isUuid(payload.teacher_id) &&
+      isUuid(payload.academic_year_id) &&
+      isUuid(payload.semester_id)
+    ) {
       try {
         const { data } = await supabase.from('teaching_assignments').insert(payload).select().single();
         if (data) return data as TeachingAssignment;
@@ -678,12 +1165,12 @@ export const academicService = {
         (a) => !(a.class_id === classId && a.subject_id === subjectId)
       );
       setLocal(STORAGE_KEYS.ASSIGNMENTS, filtered);
-      if (isSupabaseConfigured) {
+      if (isSupabaseConfigured && isUuid(classId) && isUuid(subjectId)) {
         try {
-          await supabase
-            .from('teaching_assignments')
-            .delete()
-            .match({ class_id: classId, subject_id: subjectId, academic_year_id: academicYearId, semester_id: semesterId });
+          const matchObj: Record<string, string> = { class_id: classId, subject_id: subjectId };
+          if (isUuid(academicYearId)) matchObj.academic_year_id = academicYearId;
+          if (isUuid(semesterId)) matchObj.semester_id = semesterId;
+          await supabase.from('teaching_assignments').delete().match(matchObj);
         } catch (e) {
           console.warn('Supabase delete assignment error:', e);
         }
@@ -705,6 +1192,8 @@ export const academicService = {
       current[existingIndex] = {
         ...current[existingIndex],
         teacher_id: teacherId,
+        academic_year_id: academicYearId || current[existingIndex].academic_year_id,
+        semester_id: semesterId || current[existingIndex].semester_id,
         teacher: teacher || current[existingIndex].teacher,
         class: cls || current[existingIndex].class,
         subject: subject || current[existingIndex].subject,
@@ -712,7 +1201,7 @@ export const academicService = {
       result = current[existingIndex];
       setLocal(STORAGE_KEYS.ASSIGNMENTS, [...current]);
 
-      if (isSupabaseConfigured) {
+      if (isSupabaseConfigured && isUuid(result.id) && isUuid(teacherId)) {
         try {
           await supabase
             .from('teaching_assignments')
@@ -738,7 +1227,14 @@ export const academicService = {
       const updated = [result, ...current];
       setLocal(STORAGE_KEYS.ASSIGNMENTS, updated);
 
-      if (isSupabaseConfigured) {
+      if (
+        isSupabaseConfigured &&
+        isUuid(classId) &&
+        isUuid(subjectId) &&
+        isUuid(teacherId) &&
+        isUuid(academicYearId) &&
+        isUuid(semesterId)
+      ) {
         try {
           await supabase.from('teaching_assignments').insert({
             class_id: classId,

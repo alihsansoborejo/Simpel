@@ -1,14 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { journalService } from '../../services/journalService';
 import { academicService } from '../../services/academicService';
-import { TeachingJournal, TeachingAssignment } from '../../types/database.types';
+import {
+  TeachingJournal,
+  TeachingAssignment,
+  SystemSettings,
+  Teacher,
+} from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
-  ClipboardList,
   Plus,
-  Calendar,
   CheckCircle,
   Heart,
   Sparkles,
@@ -18,7 +22,7 @@ import {
   Printer,
   Table as TableIcon,
   LayoutList,
-  Filter,
+  AlertCircle,
 } from 'lucide-react';
 
 interface TeachingJournalPageProps {
@@ -27,8 +31,14 @@ interface TeachingJournalPageProps {
 
 export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavigate }) => {
   const { user, activeRole } = useAuth();
+  const { selectedAssignmentId, selectedSubjectId, selectedClassId, setWorkspaceSelection } =
+    useWorkspace();
   const [journals, setJournals] = useState<TeachingJournal[]>([]);
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
+  const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [activeYearName, setActiveYearName] = useState<string>('2026/2027');
+  const [activeSemesterType, setActiveSemesterType] = useState<'Ganjil' | 'Genap'>('Ganjil');
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
   const [showModal, setShowModal] = useState<boolean>(false);
@@ -37,7 +47,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Form State
-  const [assignmentId, setAssignmentId] = useState<string>('asg-1');
+  const [assignmentId, setAssignmentId] = useState<string>('');
   const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [periodHours, setPeriodHours] = useState<string>('Jam ke-1 s.d. 3 (07.00 - 09.00 WIB)');
   const [topic, setTopic] = useState<string>('');
@@ -49,33 +59,76 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
   const [followUp, setFollowUp] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [jrns, asgs] = await Promise.all([
+      const [jrns, asgs, teacher, sys, years, sems] = await Promise.all([
         journalService.getJournals(),
         academicService.getTeachingAssignments(),
+        academicService.resolveTeacherForUser(user),
+        academicService.getSettings(),
+        academicService.getAcademicYears(),
+        academicService.getSemesters(),
       ]);
-      setJournals(jrns);
-      setAssignments(asgs);
-      if (asgs.length > 0) setAssignmentId(asgs[0].id);
+
+      setResolvedTeacher(teacher);
+      setSettings(sys);
+
+      const actYear = years.find((y) => y.id === sys.active_academic_year_id || y.is_active) || years[0];
+      const actSem = sems.find((s) => s.id === sys.active_semester_id || s.is_active) || sems[0];
+      if (actYear?.name) setActiveYearName(actYear.name);
+      if (actSem?.semester_type) setActiveSemesterType(actSem.semester_type);
+
+      const scopedAsgs =
+        activeRole === 'guru'
+          ? teacher
+            ? asgs.filter((a) => a.teacher_id === teacher.id)
+            : []
+          : asgs;
+      const scopedIds = new Set(scopedAsgs.map((a) => a.id));
+      const scopedJournals =
+        activeRole === 'guru' ? jrns.filter((j) => scopedIds.has(j.assignment_id)) : jrns;
+
+      setAssignments(scopedAsgs);
+      setJournals(scopedJournals);
+
+      if (scopedAsgs.length > 0) {
+        const wsAsg =
+          (selectedAssignmentId && scopedAsgs.find((a) => a.id === selectedAssignmentId)) ||
+          scopedAsgs.find(
+            (a) =>
+              (!selectedSubjectId || a.subject_id === selectedSubjectId) &&
+              (!selectedClassId || a.class_id === selectedClassId)
+          );
+        const preferredId = wsAsg?.id || scopedAsgs[0].id;
+        setAssignmentId(preferredId);
+        if (wsAsg && (selectedAssignmentId || (selectedSubjectId && selectedClassId))) {
+          setSelectedAssignmentFilter(wsAsg.id);
+        }
+      } else {
+        setAssignmentId('');
+      }
     } catch (err) {
       console.error('Gagal memuat jurnal mengajar:', err);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [activeRole, user?.id, user?.teacherId, selectedAssignmentId, selectedSubjectId, selectedClassId]);
 
   useEffect(() => {
-    loadData();
-  }, []);
-
-  useRealtimeSync(['simpel_teaching_journals', 'simpel_assignments'], () => {
     void loadData();
-  });
+  }, [loadData]);
+
+  useRealtimeSync(
+    ['simpel_teaching_journals', 'simpel_assignments', 'simpel_teachers', 'simpel_classes', 'simpel_subjects'],
+    () => {
+      void loadData();
+    }
+  );
 
   const handleCreateJournal = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!assignmentId) return;
     try {
       await journalService.createJournal({
         assignment_id: assignmentId,
@@ -92,7 +145,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
       });
       setShowModal(false);
       setStatusMessage('Jurnal mengajar harian berhasil disimpan ke database.');
-      loadData();
+      void loadData();
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (err) {
       console.error('Gagal menyimpan jurnal:', err);
@@ -128,8 +181,8 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
     const rows = filteredJournals.map((j, idx) => [
       idx + 1,
       j.date,
-      `"${j.assignment?.class?.name || 'Kelas 4'}"`,
-      `"${j.assignment?.subject?.name || 'Mapel'}"`,
+      `"${j.assignment?.class?.name || '-'}"`,
+      `"${j.assignment?.subject?.name || 'Mata Pelajaran'}"`,
       `"${j.period_hours}"`,
       `"${j.topic.replace(/"/g, '""')}"`,
       `"${j.learning_objective.replace(/"/g, '""')}"`,
@@ -159,7 +212,7 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
       <tr>
         <td class="center">${idx + 1}</td>
         <td class="center font-mono">${j.date}</td>
-        <td><strong>${j.assignment?.subject?.name || 'Mata Pelajaran'}</strong><br><small>${j.assignment?.class?.name || 'Kelas 4'}</small></td>
+        <td><strong>${j.assignment?.subject?.name || 'Mata Pelajaran'}</strong><br><small>${j.assignment?.class?.name || '-'}</small></td>
         <td>${j.topic}</td>
         <td>${j.learning_activities}</td>
         <td><span style="color:#047857;font-weight:bold;">${j.learning_method || '-'}</span></td>
@@ -188,21 +241,21 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
 
     printDocumentDirectly(contentHtml, {
       title: 'BUKU JURNAL MENGAJAR HARIAN GURU',
-      subtitle: 'Tahun Ajaran 2025/2026 - Berbasis Kurikulum Cinta (KBC) & Pembelajaran Mendalam',
+      subtitle: `Tahun Ajaran ${activeYearName} - Berbasis Kurikulum Cinta (KBC) & Pembelajaran Mendalam`,
       metadata: [
-        { label: 'Tahun Pelajaran', value: '2025/2026 (Semester Ganjil)' },
+        { label: 'Tahun Pelajaran', value: `${activeYearName} (Semester ${activeSemesterType})` },
         { label: 'Total Pertemuan', value: `${filteredJournals.length} Catatan Jurnal KBM` },
         { label: 'Pendekatan', value: 'Kurikulum Berbasis Cinta (KBC)' },
         { label: 'Tanggal Cetak', value: new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) },
       ],
       signature: {
         leftTitle: 'Guru Pengampu Mata Pelajaran,',
-        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
-        leftNip: '198503122019031008',
+        leftName: user?.profile?.full_name || resolvedTeacher?.full_name || 'Guru Pengampu',
+        leftNip: resolvedTeacher?.nip || '-',
         rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
         rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
-        rightName: 'MUIN, S.Pd.I',
-        rightNip: '197508152005011004',
+        rightName: settings?.principal_name || 'Kepala Madrasah',
+        rightNip: settings?.principal_nip || '-',
       },
     });
   };
@@ -284,12 +337,21 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
           REKAPITULASI JURNAL MENGAJAR HARIAN GURU
         </h2>
         <h3 className="text-sm font-semibold text-slate-800">
-          MI MA’ARIF AL IHSAN SOBOREJO · TAHUN PELAJARAN 2026/2027
+          {settings?.school_name || "MI MA'ARIF AL IHSAN SOBOREJO"} · TAHUN PELAJARAN {activeYearName}
         </h3>
         <p className="text-xs text-slate-600 mt-0.5">
           Soborejo, Kec. Pringsurat, Kab. Temanggung, Jawa Tengah · Dicetak pada: {new Date().toLocaleDateString('id-ID')}
         </p>
       </div>
+
+      {activeRole === 'guru' && assignments.length === 0 && (
+        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center gap-2 print:hidden">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>
+            Anda belum memiliki penugasan mengajar dari Admin Madrasah. Jurnal baru dapat diisi setelah jadwal mapel Anda ditetapkan di menu <strong>Penugasan Mengajar</strong>.
+          </span>
+        </div>
+      )}
 
       {/* Toolbar Filter & Mode Tampilan */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 print:hidden">
@@ -299,13 +361,28 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
             <span className="text-xs font-semibold text-slate-700">Mapel / Rombel:</span>
             <select
               value={selectedAssignmentFilter}
-              onChange={(e) => setSelectedAssignmentFilter(e.target.value)}
+              onChange={(e) => {
+                const nextId = e.target.value;
+                setSelectedAssignmentFilter(nextId);
+                if (nextId !== 'all') {
+                  setAssignmentId(nextId);
+                  const found = assignments.find((a) => a.id === nextId);
+                  if (found) {
+                    setWorkspaceSelection({
+                      assignmentId: found.id,
+                      subjectId: found.subject_id,
+                      classId: found.class_id,
+                      classLevel: found.class?.level || null,
+                    });
+                  }
+                }
+              }}
               className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-medium"
             >
-              <option value="all">Semua Mata Pelajaran</option>
+              <option value="all">Semua Mata Pelajaran Diampu</option>
               {assignments.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.class?.name || 'Kelas 4'} - {a.subject?.name || 'Mapel'}
+                  {a.class?.name || '-'} - {a.subject?.name || 'Mapel'}
                 </option>
               ))}
             </select>
@@ -387,9 +464,9 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
                         <div className="text-[10px] text-slate-400 mt-0.5">{j.period_hours}</div>
                       </td>
                       <td className="py-3 px-3.5">
-                        <div className="font-bold text-slate-900">{j.assignment?.subject?.name || 'Mapel'}</div>
+                        <div className="font-bold text-slate-900">{j.assignment?.subject?.name || 'Mata Pelajaran'}</div>
                         <div className="text-[11px] text-emerald-800 font-semibold mt-0.5">
-                          {j.assignment?.class?.name || 'Kelas 4'}
+                          {j.assignment?.class?.name || '-'}
                         </div>
                       </td>
                       <td className="py-3 px-3.5 font-semibold text-slate-900 leading-snug">
@@ -445,10 +522,10 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
                     <h3 className="text-sm font-bold text-slate-900">{j.topic}</h3>
                     <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
                       <span className="font-semibold text-emerald-800">
-                        {j.assignment?.subject?.name || 'Bahasa Indonesia'}
+                        {j.assignment?.subject?.name || 'Mata Pelajaran'}
                       </span>
                       <span aria-hidden="true">·</span>
-                      <span>{j.assignment?.class?.name || 'Kelas 4'}</span>
+                      <span>{j.assignment?.class?.name || '-'}</span>
                       <span aria-hidden="true">·</span>
                       <span className="font-mono tabular-nums">{j.date}</span>
                     </div>
@@ -508,17 +585,17 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
       <div className="hidden print:grid grid-cols-2 gap-8 pt-8 text-xs text-center">
         <div>
           <p>Mengetahui,</p>
-          <p className="font-bold">Kepala MI Ma’arif Al Ihsan Soborejo</p>
+          <p className="font-bold">Kepala {settings?.school_name || "MI Ma'arif Al Ihsan Soborejo"}</p>
           <div className="h-16" />
-          <p className="font-bold underline">Drs. H. Ahmad Ihsan, M.Pd.I</p>
-          <p className="font-mono">NIP. 197508122005011003</p>
+          <p className="font-bold underline">{settings?.principal_name || 'Kepala Madrasah'}</p>
+          <p className="font-mono">NIP. {settings?.principal_nip || '-'}</p>
         </div>
         <div>
           <p>Soborejo, {new Date().toLocaleDateString('id-ID')}</p>
           <p className="font-bold">Guru Pengampu</p>
           <div className="h-16" />
-          <p className="font-bold underline">Ust. Ahmad Fauzi, S.Pd.I</p>
-          <p className="font-mono">NIP. 198204152010011015</p>
+          <p className="font-bold underline">{user?.profile?.full_name || resolvedTeacher?.full_name || 'Guru Pengampu'}</p>
+          <p className="font-mono">NIP. {resolvedTeacher?.nip || '-'}</p>
         </div>
       </div>
 
@@ -541,11 +618,15 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
                     className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
                     required
                   >
-                    {assignments.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.class?.name || 'Kelas 4'} - {a.subject?.name || 'Mapel'}
-                      </option>
-                    ))}
+                    {assignments.length === 0 ? (
+                      <option value="">Belum ada penugasan mengajar</option>
+                    ) : (
+                      assignments.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.class?.name || '-'} - {a.subject?.name || 'Mapel'}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </div>
                 <div>

@@ -10,8 +10,8 @@ import {
   DEMO_GRADES,
   DEMO_REMEDIAL,
   DEMO_ENRICHMENT,
-  DEMO_STUDENTS,
 } from '../lib/demoData';
+import { academicService } from './academicService';
 
 const STORAGE_KEYS = {
   ASSESSMENTS: 'simpel_assessments',
@@ -19,6 +19,9 @@ const STORAGE_KEYS = {
   REMEDIAL: 'simpel_remedial',
   ENRICHMENT: 'simpel_enrichment',
 };
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v?: string | null) => typeof v === 'string' && UUID_REGEX.test(v);
 
 function getLocal<T>(key: string, fallback: T): T {
   try {
@@ -58,73 +61,105 @@ export interface LearningAnalysisResult {
 export const assessmentService = {
   // === ASESMEN ===
   async getAssessments(assignmentId?: string): Promise<Assessment[]> {
+    let baseItems = getLocal<Assessment[]>(STORAGE_KEYS.ASSESSMENTS, DEMO_ASSESSMENTS);
+
     if (isSupabaseConfigured) {
       try {
-        let query = supabase
+        const { data, error } = await supabase
           .from('assessments')
           .select('*, assignment:teaching_assignments(*, teacher:teachers(*), class:classes(*), subject:subjects(*))')
           .order('assessment_date', { ascending: false });
 
-        if (assignmentId) query = query.eq('assignment_id', assignmentId);
-
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) return data as Assessment[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const seen = new Set(baseItems.map((a) => a.id));
+          const merged = [...baseItems];
+          for (const item of data as Assessment[]) {
+            if (!seen.has(item.id)) {
+              merged.push(item);
+              seen.add(item.id);
+            }
+          }
+          baseItems = merged;
+        }
       } catch (err) {
         console.warn('Supabase getAssessments fallback:', err);
       }
     }
 
-    let items = getLocal<Assessment[]>(STORAGE_KEYS.ASSESSMENTS, DEMO_ASSESSMENTS);
-    if (assignmentId) items = items.filter((a) => a.assignment_id === assignmentId);
-    return items;
+    const assignments = await academicService.getTeachingAssignments();
+    let hydrated = baseItems.map((a) => ({
+      ...a,
+      assignment: assignments.find((asg) => asg.id === a.assignment_id) || a.assignment,
+    }));
+
+    if (assignmentId) hydrated = hydrated.filter((a) => a.assignment_id === assignmentId);
+    return hydrated.sort((a, b) => b.assessment_date.localeCompare(a.assessment_date));
   },
 
   async createAssessment(payload: Omit<Assessment, 'id' | 'created_at'>): Promise<Assessment> {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `asm-${Date.now()}`;
-    const newAsm: Assessment = {
+    const assignments = await academicService.getTeachingAssignments();
+    const matchedAssignment = assignments.find((a) => a.id === payload.assignment_id);
+
+    let newAsm: Assessment = {
       ...payload,
       id,
+      assignment: matchedAssignment,
       created_at: new Date().toISOString(),
     };
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id) && isUuid(payload.assignment_id)) {
       try {
         const { assignment: _a, ...dbAsm } = newAsm;
         const { data } = await supabase.from('assessments').insert(dbAsm).select().single();
-        if (data) return data as Assessment;
+        if (data) {
+          newAsm = { ...(data as Assessment), assignment: matchedAssignment };
+        }
       } catch (err) {
         console.warn('Supabase createAssessment fallback:', err);
       }
     }
 
-    const items = await this.getAssessments();
-    const updated = [newAsm, ...items];
+    const items = getLocal<Assessment[]>(STORAGE_KEYS.ASSESSMENTS, DEMO_ASSESSMENTS);
+    const updated = [newAsm, ...items.filter((a) => a.id !== newAsm.id)];
     setLocal(STORAGE_KEYS.ASSESSMENTS, updated);
     return newAsm;
   },
 
   // === NILAI (GRADES) ===
   async getGrades(assessmentId: string): Promise<Grade[]> {
-    if (isSupabaseConfigured) {
+    let baseGrades = getLocal<Grade[]>(STORAGE_KEYS.GRADES, DEMO_GRADES);
+
+    if (isSupabaseConfigured && isUuid(assessmentId)) {
       try {
         const { data, error } = await supabase
           .from('grades')
           .select('*, student:students(*)')
           .eq('assessment_id', assessmentId);
 
-        if (!error && data && data.length > 0) return data as Grade[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const seen = new Set(baseGrades.map((g) => `${g.assessment_id}_${g.student_id}`));
+          const merged = [...baseGrades];
+          for (const item of data as Grade[]) {
+            const key = `${item.assessment_id}_${item.student_id}`;
+            if (!seen.has(key)) {
+              merged.push(item);
+              seen.add(key);
+            }
+          }
+          baseGrades = merged;
+        }
       } catch (err) {
         console.warn('Supabase getGrades fallback:', err);
       }
     }
 
-    const all = getLocal<Grade[]>(STORAGE_KEYS.GRADES, DEMO_GRADES);
-    const filtered = all.filter((g) => g.assessment_id === assessmentId);
+    const students = await academicService.getStudents();
+    const filtered = baseGrades.filter((g) => g.assessment_id === assessmentId);
 
-    // Pastikan relasi student terisi
     return filtered.map((g) => ({
       ...g,
-      student: g.student || DEMO_STUDENTS.find((s) => s.id === g.student_id),
+      student: students.find((s) => s.id === g.student_id) || g.student,
     }));
   },
 
@@ -133,6 +168,7 @@ export const assessmentService = {
     entries: Array<{ studentId: string; score: number; feedback?: string | null }>
   ): Promise<Grade[]> {
     const all = getLocal<Grade[]>(STORAGE_KEYS.GRADES, DEMO_GRADES);
+    const students = await academicService.getStudents();
     const updatedGrades: Grade[] = [];
 
     for (const item of entries) {
@@ -141,14 +177,19 @@ export const assessmentService = {
       );
 
       const record: Grade = {
-        id: existingIdx >= 0 ? all[existingIdx].id : `grd-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        id:
+          existingIdx >= 0
+            ? all[existingIdx].id
+            : typeof crypto !== 'undefined' && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `grd-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         assessment_id: assessmentId,
         student_id: item.studentId,
         score: Math.min(100, Math.max(0, item.score)),
         feedback: item.feedback || null,
         created_at: existingIdx >= 0 ? all[existingIdx].created_at : new Date().toISOString(),
         updated_at: new Date().toISOString(),
-        student: DEMO_STUDENTS.find((s) => s.id === item.studentId),
+        student: students.find((s) => s.id === item.studentId),
       };
 
       if (existingIdx >= 0) {
@@ -159,21 +200,24 @@ export const assessmentService = {
       updatedGrades.push(record);
     }
 
-    if (isSupabaseConfigured) {
-      try {
-        await supabase.from('grades').upsert(
-          updatedGrades.map((g) => ({
-            id: g.id,
-            assessment_id: g.assessment_id,
-            student_id: g.student_id,
-            score: g.score,
-            feedback: g.feedback,
-            updated_at: g.updated_at,
-          })),
-          { onConflict: 'assessment_id,student_id' }
-        );
-      } catch (err) {
-        console.warn('Supabase saveGrades fallback:', err);
+    if (isSupabaseConfigured && isUuid(assessmentId)) {
+      const syncable = updatedGrades.filter((g) => isUuid(g.id) && isUuid(g.student_id));
+      if (syncable.length > 0) {
+        try {
+          await supabase.from('grades').upsert(
+            syncable.map((g) => ({
+              id: g.id,
+              assessment_id: g.assessment_id,
+              student_id: g.student_id,
+              score: g.score,
+              feedback: g.feedback,
+              updated_at: g.updated_at,
+            })),
+            { onConflict: 'assessment_id,student_id' }
+          );
+        } catch (err) {
+          console.warn('Supabase saveGrades fallback:', err);
+        }
       }
     }
 
@@ -183,96 +227,158 @@ export const assessmentService = {
 
   // === REMEDIAL ===
   async getRemedialRecords(assignmentId?: string): Promise<RemedialRecord[]> {
+    let baseItems = getLocal<RemedialRecord[]>(STORAGE_KEYS.REMEDIAL, DEMO_REMEDIAL);
+
     if (isSupabaseConfigured) {
       try {
-        let query = supabase
+        const { data, error } = await supabase
           .from('remedial_records')
           .select('*, student:students(*), assignment:teaching_assignments(*)')
           .order('execution_date', { ascending: false });
 
-        if (assignmentId) query = query.eq('assignment_id', assignmentId);
-
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) return data as RemedialRecord[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const seen = new Set(baseItems.map((r) => r.id));
+          const merged = [...baseItems];
+          for (const item of data as RemedialRecord[]) {
+            if (!seen.has(item.id)) {
+              merged.push(item);
+              seen.add(item.id);
+            }
+          }
+          baseItems = merged;
+        }
       } catch (err) {
         console.warn('Supabase getRemedialRecords fallback:', err);
       }
     }
 
-    let items = getLocal<RemedialRecord[]>(STORAGE_KEYS.REMEDIAL, DEMO_REMEDIAL);
+    const [students, assignments] = await Promise.all([
+      academicService.getStudents(),
+      academicService.getTeachingAssignments(),
+    ]);
+
+    let items = baseItems.map((r) => ({
+      ...r,
+      student: students.find((s) => s.id === r.student_id) || r.student,
+      assignment: assignments.find((a) => a.id === r.assignment_id) || r.assignment,
+    }));
+
     if (assignmentId) items = items.filter((r) => r.assignment_id === assignmentId);
-    return items;
+    return items.sort((a, b) => b.execution_date.localeCompare(a.execution_date));
   },
 
   async createRemedialRecord(payload: Omit<RemedialRecord, 'id' | 'created_at'>): Promise<RemedialRecord> {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `rem-${Date.now()}`;
-    const newRecord: RemedialRecord = {
+    const [students, assignments] = await Promise.all([
+      academicService.getStudents(),
+      academicService.getTeachingAssignments(),
+    ]);
+
+    let newRecord: RemedialRecord = {
       ...payload,
       id,
       created_at: new Date().toISOString(),
-      student: DEMO_STUDENTS.find((s) => s.id === payload.student_id),
+      student: students.find((s) => s.id === payload.student_id),
+      assignment: assignments.find((a) => a.id === payload.assignment_id),
     };
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id) && isUuid(payload.assignment_id) && isUuid(payload.student_id)) {
       try {
         const { student: _s, assignment: _a, ...dbPayload } = newRecord;
         const { data } = await supabase.from('remedial_records').insert(dbPayload).select().single();
-        if (data) return data as RemedialRecord;
+        if (data) {
+          newRecord = {
+            ...(data as RemedialRecord),
+            student: newRecord.student,
+            assignment: newRecord.assignment,
+          };
+        }
       } catch (err) {
         console.warn('Supabase createRemedialRecord fallback:', err);
       }
     }
 
-    const current = await this.getRemedialRecords();
-    const updated = [newRecord, ...current];
+    const current = getLocal<RemedialRecord[]>(STORAGE_KEYS.REMEDIAL, DEMO_REMEDIAL);
+    const updated = [newRecord, ...current.filter((r) => r.id !== newRecord.id)];
     setLocal(STORAGE_KEYS.REMEDIAL, updated);
     return newRecord;
   },
 
   // === PENGAYAAN ===
   async getEnrichmentRecords(assignmentId?: string): Promise<EnrichmentRecord[]> {
+    let baseItems = getLocal<EnrichmentRecord[]>(STORAGE_KEYS.ENRICHMENT, DEMO_ENRICHMENT);
+
     if (isSupabaseConfigured) {
       try {
-        let query = supabase
+        const { data, error } = await supabase
           .from('enrichment_records')
           .select('*, student:students(*), assignment:teaching_assignments(*)')
           .order('execution_date', { ascending: false });
 
-        if (assignmentId) query = query.eq('assignment_id', assignmentId);
-
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) return data as EnrichmentRecord[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const seen = new Set(baseItems.map((e) => e.id));
+          const merged = [...baseItems];
+          for (const item of data as EnrichmentRecord[]) {
+            if (!seen.has(item.id)) {
+              merged.push(item);
+              seen.add(item.id);
+            }
+          }
+          baseItems = merged;
+        }
       } catch (err) {
         console.warn('Supabase getEnrichmentRecords fallback:', err);
       }
     }
 
-    let items = getLocal<EnrichmentRecord[]>(STORAGE_KEYS.ENRICHMENT, DEMO_ENRICHMENT);
+    const [students, assignments] = await Promise.all([
+      academicService.getStudents(),
+      academicService.getTeachingAssignments(),
+    ]);
+
+    let items = baseItems.map((e) => ({
+      ...e,
+      student: students.find((s) => s.id === e.student_id) || e.student,
+      assignment: assignments.find((a) => a.id === e.assignment_id) || e.assignment,
+    }));
+
     if (assignmentId) items = items.filter((e) => e.assignment_id === assignmentId);
-    return items;
+    return items.sort((a, b) => b.execution_date.localeCompare(a.execution_date));
   },
 
   async createEnrichmentRecord(payload: Omit<EnrichmentRecord, 'id' | 'created_at'>): Promise<EnrichmentRecord> {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `enr-${Date.now()}`;
-    const newRecord: EnrichmentRecord = {
+    const [students, assignments] = await Promise.all([
+      academicService.getStudents(),
+      academicService.getTeachingAssignments(),
+    ]);
+
+    let newRecord: EnrichmentRecord = {
       ...payload,
       id,
       created_at: new Date().toISOString(),
-      student: DEMO_STUDENTS.find((s) => s.id === payload.student_id),
+      student: students.find((s) => s.id === payload.student_id),
+      assignment: assignments.find((a) => a.id === payload.assignment_id),
     };
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id) && isUuid(payload.assignment_id) && isUuid(payload.student_id)) {
       try {
         const { student: _s, assignment: _a, ...dbPayload } = newRecord;
         const { data } = await supabase.from('enrichment_records').insert(dbPayload).select().single();
-        if (data) return data as EnrichmentRecord;
+        if (data) {
+          newRecord = {
+            ...(data as EnrichmentRecord),
+            student: newRecord.student,
+            assignment: newRecord.assignment,
+          };
+        }
       } catch (err) {
         console.warn('Supabase createEnrichmentRecord fallback:', err);
       }
     }
 
-    const current = await this.getEnrichmentRecords();
-    const updated = [newRecord, ...current];
+    const current = getLocal<EnrichmentRecord[]>(STORAGE_KEYS.ENRICHMENT, DEMO_ENRICHMENT);
+    const updated = [newRecord, ...current.filter((e) => e.id !== newRecord.id)];
     setLocal(STORAGE_KEYS.ENRICHMENT, updated);
     return newRecord;
   },

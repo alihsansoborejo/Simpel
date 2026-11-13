@@ -1,8 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
 import { reportService, StudentSubjectScore, ClassLegerRow } from '../../services/reportService';
-import { ClassRoom, Subject, Student, Teacher } from '../../types/database.types';
+import {
+  ClassRoom,
+  Subject,
+  Teacher,
+  TeachingAssignment,
+  SystemSettings,
+} from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
@@ -29,10 +36,21 @@ interface GradeLedgerPageProps {
 
 export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) => {
   const { user, activeRole } = useAuth();
+  const {
+    selectedClassId: wsClassId,
+    selectedSubjectId: wsSubjectId,
+    setWorkspaceSelection,
+  } = useWorkspace();
+
   const [classes, setClasses] = useState<ClassRoom[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
-  const [selectedClassId, setSelectedClassId] = useState<string>('cls-4');
-  const [selectedSubjectId, setSelectedSubjectId] = useState<string>('sbj-ind');
+  const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
+  const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [activeYearName, setActiveYearName] = useState<string>('2025/2026');
+  const [activeSemesterType, setActiveSemesterType] = useState<string>('Ganjil');
+  const [selectedClassId, setSelectedClassId] = useState<string>('');
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string>('');
   const [viewMode, setViewMode] = useState<'per-mapel' | 'rekap-kelas'>('per-mapel');
 
   // Data States
@@ -44,36 +62,111 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState<boolean>(false);
 
+  const isTeacherRole = activeRole === 'guru';
+  const isHomeroomRole = activeRole === 'wali_kelas';
+  const canViewOverallClass = ['wali_kelas', 'admin', 'kepala_madrasah'].includes(activeRole);
+
   const loadBaseData = async () => {
     try {
-      const [clss, sbjs, hrs] = await Promise.all([
+      const [clss, sbjs, asgs, sysSettings, years, sems, teacher] = await Promise.all([
         academicService.getClasses(),
         academicService.getSubjects(),
-        academicService.getHomeroomAssignments(),
+        academicService.getTeachingAssignments(),
+        academicService.getSettings(),
+        academicService.getAcademicYears(),
+        academicService.getSemesters(),
+        academicService.resolveTeacherForUser(user),
       ]);
 
-      setClasses(clss);
-      setSubjects(sbjs);
+      setResolvedTeacher(teacher);
+      setSettings(sysSettings);
 
-      let targetClass = 'cls-4';
-      if (activeRole === 'wali_kelas' && user?.teacherId) {
-        const found = hrs.find((h) => h.teacher_id === user.teacherId);
-        if (found) targetClass = found.class_id;
-      } else if (user?.homeroomClassId) {
-        targetClass = user.homeroomClassId;
+      const activeYear =
+        years.find((y) => y.id === sysSettings.active_academic_year_id) ||
+        years.find((y) => y.is_active) ||
+        years[0];
+      const activeSem =
+        sems.find((s) => s.id === sysSettings.active_semester_id) ||
+        sems.find((s) => s.is_active) ||
+        sems[0];
+
+      if (activeYear?.name) setActiveYearName(activeYear.name);
+      if (activeSem?.semester_type) setActiveSemesterType(activeSem.semester_type);
+
+      const teacherAsgs =
+        isTeacherRole && teacher
+          ? asgs.filter((a) => a.teacher_id === teacher.id)
+          : isTeacherRole
+          ? []
+          : asgs;
+      setAssignments(teacherAsgs);
+
+      let scopedClasses = clss;
+      let scopedSubjects = sbjs;
+
+      if (isTeacherRole) {
+        const assignedClassIds = new Set(teacherAsgs.map((a) => a.class_id));
+        const assignedSubjectIds = new Set(teacherAsgs.map((a) => a.subject_id));
+        scopedClasses = clss.filter((c) => assignedClassIds.has(c.id));
+        scopedSubjects = sbjs.filter((s) => assignedSubjectIds.has(s.id));
+        setViewMode('per-mapel');
+      } else if (isHomeroomRole) {
+        const homeroomClass = await academicService.resolveHomeroomClassForUser(user, teacher);
+        scopedClasses = homeroomClass ? [homeroomClass] : [];
       }
 
+      setClasses(scopedClasses);
+      setSubjects(scopedSubjects);
+
+      const targetClass =
+        (wsClassId && scopedClasses.some((c) => c.id === wsClassId) ? wsClassId : '') ||
+        (selectedClassId && scopedClasses.some((c) => c.id === selectedClassId)
+          ? selectedClassId
+          : '') ||
+        scopedClasses[0]?.id ||
+        '';
+
       setSelectedClassId(targetClass);
-      if (sbjs.length > 0) {
-        const defaultSbj = sbjs.find((s) => s.id === 'sbj-ind') || sbjs[0];
-        setSelectedSubjectId(defaultSbj.id);
+
+      const validSubjectsForClass = isTeacherRole
+        ? scopedSubjects.filter((s) =>
+            teacherAsgs.some((a) => a.class_id === targetClass && a.subject_id === s.id)
+          )
+        : scopedSubjects;
+
+      const targetSubject =
+        (wsSubjectId && validSubjectsForClass.some((s) => s.id === wsSubjectId)
+          ? wsSubjectId
+          : '') ||
+        (selectedSubjectId && validSubjectsForClass.some((s) => s.id === selectedSubjectId)
+          ? selectedSubjectId
+          : '') ||
+        validSubjectsForClass[0]?.id ||
+        '';
+
+      setSelectedSubjectId(targetSubject);
+
+      if (!targetClass || (viewMode === 'per-mapel' && !targetSubject)) {
+        setSubjectScores([]);
+        setOverallRows([]);
+        setOverallSubjects([]);
+        setIsLoading(false);
       }
     } catch (err) {
       console.error('Gagal memuat basis data leger:', err);
+      setIsLoading(false);
     }
   };
 
   const loadLedgerData = async () => {
+    if (!selectedClassId || (viewMode === 'per-mapel' && !selectedSubjectId)) {
+      setSubjectScores([]);
+      setOverallRows([]);
+      setOverallSubjects([]);
+      setIsLoading(false);
+      return;
+    }
+
     setIsLoading(true);
     try {
       setIsLocked(reportService.isReportCardLocked(selectedClassId));
@@ -94,21 +187,59 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
   };
 
   useEffect(() => {
-    loadBaseData();
-  }, [activeRole]);
+    void loadBaseData();
+  }, [activeRole, user?.id]);
+
+  // Sinkronkan ketika pilihan dari Sidebar/Dashboard berubah
+  useEffect(() => {
+    if (wsClassId && classes.some((c) => c.id === wsClassId) && wsClassId !== selectedClassId) {
+      setSelectedClassId(wsClassId);
+    }
+    if (wsSubjectId) {
+      const allowedForWsClass = isTeacherRole
+        ? subjects.filter((s) =>
+            assignments.some(
+              (a) => a.class_id === (wsClassId || selectedClassId) && a.subject_id === s.id
+            )
+          )
+        : subjects;
+      if (allowedForWsClass.some((s) => s.id === wsSubjectId) && wsSubjectId !== selectedSubjectId) {
+        setSelectedSubjectId(wsSubjectId);
+      }
+    }
+  }, [wsClassId, wsSubjectId, classes, subjects, assignments]);
 
   useEffect(() => {
-    if (selectedClassId && selectedSubjectId) {
-      loadLedgerData();
+    if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
+      void loadLedgerData();
+    } else {
+      setSubjectScores([]);
+      setOverallRows([]);
+      setIsLoading(false);
     }
   }, [selectedClassId, selectedSubjectId, viewMode]);
 
   useRealtimeSync(
-    ['simpel_subject_ledger_v1', 'simpel_report_card_locks_v1', 'simpel_students', 'simpel_classes', 'simpel_subjects', 'simpel_class_members'],
+    [
+      'simpel_subject_ledger_v1',
+      'simpel_report_card_locks_v1',
+      'simpel_students',
+      'simpel_classes',
+      'simpel_subjects',
+      'simpel_class_members',
+      'simpel_assignments',
+      'simpel_teachers',
+      'simpel_homeroom_assignments',
+      'simpel_settings',
+      'simpel_academic_years',
+      'simpel_semesters',
+    ],
     () => {
-      if (selectedClassId && selectedSubjectId) {
-        void loadLedgerData();
-      }
+      void loadBaseData().then(() => {
+        if (selectedClassId && (viewMode === 'rekap-kelas' || selectedSubjectId)) {
+          void loadLedgerData();
+        }
+      });
     }
   );
 
@@ -179,18 +310,63 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
     setTimeout(() => setStatusMessage(null), 3500);
   };
 
-  const currentClass = classes.find((c) => c.id === selectedClassId) || {
-    id: selectedClassId,
-    name: 'Kelas 4',
-    level: 4,
-    phase: 'B',
+  const availableSubjectsForClass = isTeacherRole
+    ? subjects.filter((s) =>
+        assignments.some((a) => a.class_id === selectedClassId && a.subject_id === s.id)
+      )
+    : subjects;
+
+  const handleClassChange = (nextClassId: string) => {
+    setSelectedClassId(nextClassId);
+    const nextCls = classes.find((c) => c.id === nextClassId);
+    const validSubjs = isTeacherRole
+      ? subjects.filter((s) =>
+          assignments.some((a) => a.class_id === nextClassId && a.subject_id === s.id)
+        )
+      : subjects;
+    const nextSubjId = validSubjs.some((s) => s.id === selectedSubjectId)
+      ? selectedSubjectId
+      : validSubjs[0]?.id || '';
+    if (nextSubjId !== selectedSubjectId) {
+      setSelectedSubjectId(nextSubjId);
+    }
+    const matchedAsg = assignments.find(
+      (a) => a.class_id === nextClassId && a.subject_id === nextSubjId
+    );
+    setWorkspaceSelection({
+      classId: nextClassId || null,
+      classLevel: nextCls?.level ?? null,
+      subjectId: nextSubjId || null,
+      assignmentId: matchedAsg?.id ?? null,
+    });
   };
 
-  const currentSubject = subjects.find((s) => s.id === selectedSubjectId) || {
-    id: selectedSubjectId,
-    name: 'Bahasa Indonesia',
-    code: 'BI',
+  const handleSubjectChange = (nextSubjectId: string) => {
+    setSelectedSubjectId(nextSubjectId);
+    const matchedAsg = assignments.find(
+      (a) => a.class_id === selectedClassId && a.subject_id === nextSubjectId
+    );
+    setWorkspaceSelection({
+      subjectId: nextSubjectId || null,
+      assignmentId: matchedAsg?.id ?? null,
+    });
   };
+
+  const kktpDefault = Number(settings?.kktp_default ?? 75);
+
+  const currentClass = classes.find((c) => c.id === selectedClassId) || {
+    id: selectedClassId,
+    name: selectedClassId ? 'Rombel Terpilih' : 'Belum Ada Rombel',
+    level: 0,
+    phase: 'B' as const,
+  };
+
+  const currentSubject = availableSubjectsForClass.find((s) => s.id === selectedSubjectId) ||
+    subjects.find((s) => s.id === selectedSubjectId) || {
+      id: selectedSubjectId,
+      name: selectedSubjectId ? 'Mata Pelajaran' : 'Belum Ada Mapel',
+      code: '-',
+    };
 
   // Ekspor CSV
   const handleExportCSV = () => {
@@ -230,9 +406,10 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       const csv = '\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\r\n');
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
+      const safeYear = activeYearName.replace(/[\/\s]+/g, '_');
       const a = document.createElement('a');
       a.href = url;
-      a.download = `leger_nilai_${currentSubject.name.replace(/\s+/g, '_')}_${currentClass.name.replace(/\s+/g, '_')}_2025_2026.csv`;
+      a.download = `leger_nilai_${currentSubject.name.replace(/\s+/g, '_')}_${currentClass.name.replace(/\s+/g, '_')}_${safeYear}.csv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -256,9 +433,10 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       const csv = '\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\r\n');
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
+      const safeYear = activeYearName.replace(/[\/\s]+/g, '_');
       const a = document.createElement('a');
       a.href = url;
-      a.download = `leger_rapor_kelas_${currentClass.name.replace(/\s+/g, '_')}_2025_2026.csv`;
+      a.download = `leger_rapor_kelas_${currentClass.name.replace(/\s+/g, '_')}_${safeYear}.csv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -273,7 +451,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
 
     if (viewMode === 'per-mapel') {
       docTitle = `LEGER NILAI ASESMEN & RAPOR MATA PELAJARAN`;
-      docSubtitle = `${currentSubject.name} - ${currentClass.name} (Fase ${currentClass.phase}) - Semester Ganjil 2025/2026`;
+      docSubtitle = `${currentSubject.name} - ${currentClass.name} (Fase ${currentClass.phase}) - Semester ${activeSemesterType} ${activeYearName}`;
 
       const rowsHtml = subjectScores.map((s, idx) => `
         <tr>
@@ -325,7 +503,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       `;
     } else {
       docTitle = `LEGER REKAPITULASI NILAI RAPOR ROMBONGAN BELAJAR`;
-      docSubtitle = `${currentClass.name} (Fase ${currentClass.phase}) - Tahun Ajaran 2025/2026`;
+      docSubtitle = `${currentClass.name} (Fase ${currentClass.phase}) - Tahun Ajaran ${activeYearName}`;
 
       const headerCols = overallSubjects.map((s) => `<th style="width: 38px;" title="${s.name}">${s.code}</th>`).join('');
 
@@ -359,23 +537,30 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       `;
     }
 
+    const teacherDisplayName = resolvedTeacher
+      ? `${resolvedTeacher.title_prefix || ''} ${resolvedTeacher.full_name} ${resolvedTeacher.title_suffix || ''}`.trim()
+      : user?.profile?.full_name || 'Guru Pengampu';
+
     printDocumentDirectly(contentHtml, {
       title: docTitle,
       subtitle: docSubtitle,
+      schoolName: settings?.school_name,
+      schoolAddress: settings?.address,
+      logoUrl: settings?.logo_url || undefined,
       metadata: [
-        { label: 'Tahun Ajaran', value: '2025/2026 (Semester Ganjil)' },
+        { label: 'Tahun Ajaran', value: `${activeYearName} (Semester ${activeSemesterType})` },
         { label: 'Rombongan Belajar', value: currentClass.name },
-        { label: 'KKTP Satuan Pendidikan', value: '75.00' },
+        { label: 'KKTP Satuan Pendidikan', value: kktpDefault.toFixed(2) },
         { label: 'Status Dokumen', value: isLocked ? 'Terkunci & Disahkan' : 'Draft Penilaian' },
       ],
       signature: {
-        leftTitle: 'Wali Kelas / Guru Pengampu,',
-        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
-        leftNip: '198503122019031008',
+        leftTitle: isHomeroomRole ? 'Wali Kelas,' : 'Guru Pengampu,',
+        leftName: teacherDisplayName,
+        leftNip: resolvedTeacher?.nip || '-',
         rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
         rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
-        rightName: 'MUIN, S.Pd.I',
-        rightNip: '197508152005011004',
+        rightName: settings?.principal_name || 'Kepala Madrasah',
+        rightNip: settings?.principal_nip || '-',
       },
     });
   };
@@ -470,6 +655,31 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         </div>
       )}
 
+      {/* Peringatan jika Guru / Wali Kelas belum memiliki penugasan */}
+      {isTeacherRole && classes.length === 0 && (
+        <div className="flex items-start gap-2.5 p-3.5 text-xs text-amber-900 bg-amber-50 rounded-xl border border-amber-200">
+          <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+          <div>
+            <p className="font-bold">Belum Ada Penugasan Mengajar</p>
+            <p className="text-[11px] text-amber-800 mt-0.5">
+              Admin belum menetapkan jadwal/penugasan mata pelajaran untuk akun Anda di menu Penugasan Mengajar.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {isHomeroomRole && classes.length === 0 && (
+        <div className="flex items-start gap-2.5 p-3.5 text-xs text-amber-900 bg-amber-50 rounded-xl border border-amber-200">
+          <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+          <div>
+            <p className="font-bold">Belum Ada Rombel Binaan Wali Kelas</p>
+            <p className="text-[11px] text-amber-800 mt-0.5">
+              Admin belum menugaskan rombongan belajar binaan untuk akun Wali Kelas Anda di menu Penugasan Wali Kelas.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Filter Rombel & Mode Tampilan */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -478,14 +688,19 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
             <span className="text-xs font-semibold text-slate-700">Rombel:</span>
             <select
               value={selectedClassId}
-              onChange={(e) => setSelectedClassId(e.target.value)}
-              className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-bold text-slate-900"
+              onChange={(e) => handleClassChange(e.target.value)}
+              disabled={classes.length === 0}
+              className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-bold text-slate-900 disabled:bg-slate-50"
             >
-              {classes.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} (Fase {c.phase})
-                </option>
-              ))}
+              {classes.length === 0 ? (
+                <option value="">Tidak ada rombel</option>
+              ) : (
+                classes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} (Fase {c.phase})
+                  </option>
+                ))
+              )}
             </select>
           </div>
 
@@ -501,16 +716,18 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
             >
               Leger Per Mata Pelajaran
             </button>
-            <button
-              onClick={() => setViewMode('rekap-kelas')}
-              className={`px-3 py-1 rounded font-semibold transition-all ${
-                viewMode === 'rekap-kelas'
-                  ? 'bg-white text-emerald-900 shadow-2xs font-bold'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Leger Rekap Rombel Kelas
-            </button>
+            {canViewOverallClass && (
+              <button
+                onClick={() => setViewMode('rekap-kelas')}
+                className={`px-3 py-1 rounded font-semibold transition-all ${
+                  viewMode === 'rekap-kelas'
+                    ? 'bg-white text-emerald-900 shadow-2xs font-bold'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Leger Rekap Rombel Kelas
+              </button>
+            )}
           </div>
 
           {/* Pilihan Mata Pelajaran (hanya aktif jika mode per-mapel) */}
@@ -519,14 +736,19 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
               <span className="text-xs font-semibold text-slate-700">Mata Pelajaran:</span>
               <select
                 value={selectedSubjectId}
-                onChange={(e) => setSelectedSubjectId(e.target.value)}
-                className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-semibold text-emerald-950"
+                onChange={(e) => handleSubjectChange(e.target.value)}
+                disabled={availableSubjectsForClass.length === 0}
+                className="text-xs px-3 py-1.5 bg-white border border-slate-200 rounded-lg focus:outline-emerald-600 font-semibold text-emerald-950 disabled:bg-slate-50"
               >
-                {subjects.map((sbj) => (
-                  <option key={sbj.id} value={sbj.id}>
-                    {sbj.name} ({sbj.category})
-                  </option>
-                ))}
+                {availableSubjectsForClass.length === 0 ? (
+                  <option value="">Tidak ada mapel</option>
+                ) : (
+                  availableSubjectsForClass.map((sbj) => (
+                    <option key={sbj.id} value={sbj.id}>
+                      {sbj.name} ({sbj.category})
+                    </option>
+                  ))
+                )}
               </select>
             </div>
           )}
@@ -536,7 +758,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
         <div className="flex items-center gap-3 text-xs">
           <span className="text-slate-500">Kriteria Ketuntasan (KKTP):</span>
           <span className="font-mono tabular-nums font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-            75.00
+            {kktpDefault.toFixed(2)}
           </span>
         </div>
       </div>
@@ -807,7 +1029,7 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
                           <td
                             key={s.id}
                             className={`py-2 px-2 text-center font-mono tabular-nums ${
-                              sc < 75 ? 'text-rose-700 font-bold bg-rose-50/50' : 'text-slate-800'
+                              sc < kktpDefault ? 'text-rose-700 font-bold bg-rose-50/50' : 'text-slate-800'
                             }`}
                           >
                             {sc || '-'}

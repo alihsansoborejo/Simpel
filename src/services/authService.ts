@@ -4,6 +4,7 @@ import { Profile, UserRole } from '../types/database.types';
 import { DEMO_USERS } from '../lib/demoData';
 import { getDemoUsers } from './userService';
 import { academicService } from './academicService';
+import { syncService } from './syncService';
 
 const LOCAL_SESSION_KEY = 'simpel_mi_session_user';
 let lastSupabaseAuthError: string | null = null;
@@ -40,16 +41,14 @@ export async function signInSupabaseStrict(email: string, password: string): Pro
     throw new Error('Sesi Supabase Auth tidak terbentuk.');
   }
   lastSupabaseAuthError = null;
-  return await fetchFullUserAccount(authData.user.id, normalizedInput);
+  const fullUser = await fetchFullUserAccount(authData.user.id, normalizedInput);
+  void syncService.syncAllLocalToCloud();
+  return fullUser;
 }
 
-export async function loginWithEmail(email: string, password?: string): Promise<AuthUser> {
-  const normalizedInput = email.trim().toLowerCase();
-  lastSupabaseAuthError = null;
-
-  // Cari dari daftar seluruh akun yang dibuat melalui Manajemen Akun & Guru atau master
+function findMatchedAppUser(normalizedInput: string) {
   const dynamicUsers = getDemoUsers();
-  const matchedUser =
+  return (
     dynamicUsers.find((u) => {
       const uEmail = u.email.toLowerCase();
       return (
@@ -59,7 +58,29 @@ export async function loginWithEmail(email: string, password?: string): Promise<
       );
     }) ||
     DEMO_USERS.find((u) => u.email.toLowerCase() === normalizedInput) ||
-    (normalizedInput === 'alihsansoborejo@gmail.com' ? DEMO_USERS[0] : undefined);
+    (normalizedInput === 'alihsansoborejo@gmail.com' ? DEMO_USERS[0] : undefined)
+  );
+}
+
+export async function loginWithEmail(email: string, password?: string): Promise<AuthUser> {
+  const normalizedInput = email.trim().toLowerCase();
+  lastSupabaseAuthError = null;
+
+  // Cari dari daftar seluruh akun yang tersinkron di Manajemen Akun & Guru
+  let matchedUser = findMatchedAppUser(normalizedInput);
+
+  // Jika perangkat lain baru saja dibuatkan akun oleh Admin dan belum sempat sinkron, paksa tarik state terbaru dulu
+  if (!matchedUser) {
+    try {
+      await syncService.pullFromServer(0, { priorityFast: true });
+      if (isSupabaseConfigured) {
+        await syncService.pullFromSupabaseCloud({ fastOnly: true, hydrateLocalServer: true });
+      }
+      matchedUser = findMatchedAppUser(normalizedInput);
+    } catch {
+      // ignore network error during refresh attempt
+    }
+  }
 
   if (isSupabaseConfigured) {
     try {
@@ -69,7 +90,14 @@ export async function loginWithEmail(email: string, password?: string): Promise<
       });
 
       if (!authError && authData?.user) {
-        return await fetchFullUserAccount(authData.user.id, normalizedInput);
+        try {
+          const fullUser = await fetchFullUserAccount(authData.user.id, normalizedInput);
+          void syncService.syncAllLocalToCloud();
+          return fullUser;
+        } catch (profileErr) {
+          if (!matchedUser) throw profileErr;
+          console.warn('Supabase profile incomplete, using synced app registry:', profileErr);
+        }
       }
 
       if (authError) {
@@ -88,10 +116,85 @@ export async function loginWithEmail(email: string, password?: string): Promise<
     }
   }
 
+  // Verifikasi lintas server via Supabase Cloud RPC jika akun berasal dari app_sync_state atau belum ada lokal
+  const rawStoredPass = matchedUser && 'password' in matchedUser ? (matchedUser as any).password : undefined;
+  const needsCloudRpcVerify =
+    isSupabaseConfigured && (!matchedUser || rawStoredPass === '__CLOUD_VERIFIED__' || rawStoredPass === '••••••••');
+
+  if (needsCloudRpcVerify) {
+    try {
+      const { data: cloudAuth, error: rpcErr } = await supabase.rpc('verify_app_user_login', {
+        p_email: normalizedInput,
+        p_password: password?.trim() || '',
+      });
+      if (!rpcErr && cloudAuth) {
+        if (cloudAuth.ok && cloudAuth.user) {
+          const cu = cloudAuth.user;
+          const roles: UserRole[] = Array.isArray(cu.roles) && cu.roles.length > 0 ? cu.roles : ['guru'];
+          const resolvedTeacher = await academicService.resolveTeacherForUser({
+            id: cu.id,
+            email: cu.email,
+            profile: { full_name: cu.full_name },
+            teacherId: cu.teacher_id || null,
+          });
+          const resolvedTeacherId = cu.teacher_id || resolvedTeacher?.id || null;
+          let homeroomClassId: string | null = cu.homeroom_class_id || null;
+          if (!homeroomClassId) {
+            const hrCls = await academicService.resolveHomeroomClassForUser(
+              {
+                id: cu.id,
+                email: cu.email,
+                profile: { full_name: cu.full_name },
+                teacherId: resolvedTeacherId,
+              },
+              resolvedTeacher
+            );
+            homeroomClassId = hrCls?.id || null;
+          }
+          const cloudProfile: Profile = {
+            id: cu.id,
+            email: cu.email,
+            full_name: cu.full_name,
+            phone_number: cu.phone_number || null,
+            avatar_url: null,
+            is_active: cu.is_active ?? true,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          const authUser: AuthUser = {
+            id: cu.id,
+            email: cu.email,
+            profile: cloudProfile,
+            roles,
+            activeRole: roles[0],
+            teacherId: resolvedTeacherId,
+            homeroomClassId,
+          };
+          localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));
+          return authUser;
+        }
+        if (cloudAuth.reason === 'inactive') {
+          throw new Error(`Akun "${email}" berstatus nonaktif. Silakan hubungi Administrator Madrasah.`);
+        }
+        if (cloudAuth.reason === 'invalid_password') {
+          throw new Error('Kata sandi yang Anda masukkan salah.');
+        }
+      }
+    } catch (cloudErr: any) {
+      if (
+        cloudErr?.message?.includes('Kata sandi') ||
+        cloudErr?.message?.includes('nonaktif')
+      ) {
+        throw cloudErr;
+      }
+      // RPC belum tersedia di SQL; lanjutkan fallback lokal
+    }
+  }
+
   // Jika tidak ditemukan akun yang cocok
   if (!matchedUser) {
     throw new Error(
-      `Email "${email}" belum terdaftar. Pastikan akun telah didaftarkan melalui panel Administrator.`
+      `Email "${email}" belum terdaftar. Pastikan akun telah didaftarkan melalui panel Administrator dan perangkat terhubung ke internet.`
     );
   }
 
@@ -106,8 +209,11 @@ export async function loginWithEmail(email: string, password?: string): Promise<
   }
 
   // Verifikasi kata sandi akun jika password dimasukkan
-  const expectedPassword = ('password' in matchedUser && (matchedUser as any).password) || 'AlIhsan2026!';
-  if (password && password.trim() !== expectedPassword && password.trim() !== 'AlIhsan2026!') {
+  const expectedPassword =
+    rawStoredPass && rawStoredPass !== '__CLOUD_VERIFIED__' && rawStoredPass !== '••••••••'
+      ? rawStoredPass
+      : 'AlIhsan2026!';
+  if (password && password.trim() !== expectedPassword) {
     throw new Error('Kata sandi yang Anda masukkan salah. Kata sandi standar madrasah: AlIhsan2026!');
   }
 
@@ -132,23 +238,6 @@ export async function loginWithEmail(email: string, password?: string): Promise<
   }
 
   // Cari keterkaitan wali kelas dan guru
-  let homeroomClassId: string | null = null;
-  const teacherId =
-    ('teacher_info' in matchedUser && (matchedUser as any).teacher_info?.id) ||
-    ('teacherId' in matchedUser ? (matchedUser as any).teacherId : undefined);
-
-  if (teacherId) {
-    try {
-      const classes = await academicService.getClasses();
-      const matchedClass = classes.find((c) => c.homeroom_teacher_id === teacherId);
-      if (matchedClass) {
-        homeroomClassId = matchedClass.id;
-      }
-    } catch (err) {
-      console.warn('Error reading homeroom class during login:', err);
-    }
-  }
-
   const profile: Profile =
     'profile' in matchedUser
       ? (matchedUser as any).profile
@@ -162,6 +251,34 @@ export async function loginWithEmail(email: string, password?: string): Promise<
           created_at: matchedUser.created_at,
           updated_at: matchedUser.created_at,
         };
+
+  const initialTeacherId =
+    ('teacher_info' in matchedUser && (matchedUser as any).teacher_info?.id) ||
+    ('teacherId' in matchedUser ? (matchedUser as any).teacherId : undefined);
+
+  const resolvedTeacher = await academicService.resolveTeacherForUser({
+    id: matchedUser.id,
+    email: matchedUser.email,
+    profile: { full_name: profile.full_name },
+    teacherId: initialTeacherId || null,
+  });
+  const teacherId = resolvedTeacher?.id || initialTeacherId || null;
+
+  let homeroomClassId: string | null = null;
+  try {
+    const hrCls = await academicService.resolveHomeroomClassForUser(
+      {
+        id: matchedUser.id,
+        email: matchedUser.email,
+        profile: { full_name: profile.full_name },
+        teacherId,
+      },
+      resolvedTeacher
+    );
+    homeroomClassId = hrCls?.id || null;
+  } catch (err) {
+    console.warn('Error reading homeroom class during login:', err);
+  }
 
   const authUser: AuthUser = {
     id: matchedUser.id,
@@ -281,7 +398,7 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
 
   const roles: UserRole[] = rolesData.map((r: { role: UserRole }) => r.role);
 
-  // 3. Cari teacher_id jika terdaftar sebagai guru
+  // 3. Cari teacher_id dan homeroom_class_id jika terdaftar sebagai guru/wali kelas
   let teacherId: string | null = null;
   const { data: teacherData } = await supabase
     .from('teachers')
@@ -292,6 +409,24 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
   if (teacherData) {
     teacherId = teacherData.id;
   }
+
+  const resolvedTeacher = await academicService.resolveTeacherForUser({
+    id: userId,
+    email: profile.email || emailFallback || '',
+    profile: { full_name: profile.full_name },
+    teacherId,
+  });
+  teacherId = teacherId || resolvedTeacher?.id || null;
+
+  const resolvedHomeroom = await academicService.resolveHomeroomClassForUser(
+    {
+      id: userId,
+      email: profile.email || emailFallback || '',
+      profile: { full_name: profile.full_name },
+      teacherId,
+    },
+    resolvedTeacher
+  );
 
   // Peran aktif pertama kali: prioritaskan primary role atau role pertama
   const primaryRoleEntry = rolesData.find((r: { is_primary: boolean }) => r.is_primary);
@@ -304,7 +439,7 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
     roles,
     activeRole,
     teacherId,
-    homeroomClassId: null,
+    homeroomClassId: resolvedHomeroom?.id || null,
   };
 
   localStorage.setItem(LOCAL_SESSION_KEY, JSON.stringify(authUser));

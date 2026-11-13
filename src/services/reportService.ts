@@ -1,6 +1,5 @@
 import { Student, ClassRoom, Subject, ClassMember } from '../types/database.types';
 import { academicService } from './academicService';
-import { DEMO_STUDENTS, DEMO_SUBJECTS, DEMO_CLASSES } from '../lib/demoData';
 
 export interface StudentSubjectScore {
   studentId: string;
@@ -96,7 +95,15 @@ export const reportService = {
       return [];
     }
 
-    const currentSubject = subjects.find((s) => s.id === subjectId) || DEMO_SUBJECTS[6];
+    const currentSubject = subjects.find((s) => s.id === subjectId) || {
+      id: subjectId,
+      name: 'Mata Pelajaran',
+      code: 'MP',
+      category: 'Umum' as const,
+      kkm: 75,
+      order_index: 99,
+      created_at: '',
+    };
 
     // Seed data nilai dengan variasi realistis sesuai KKTP 75
     const initialScores: StudentSubjectScore[] = pool.map((s, idx) => {

@@ -69,6 +69,10 @@ BEGIN
     END LOOP;
 END $$;
 
+DROP POLICY IF EXISTS "system_settings_public_read" ON public.system_settings;
+CREATE POLICY "system_settings_public_read" ON public.system_settings
+    FOR SELECT TO anon, authenticated USING (TRUE);
+
 -- 4. PERENCANAAN PEMBELAJARAN (CP, TP, ATP, Prota, Prosem, Modul, LKPD, Rencana Asesmen)
 -- Semua guru & Kamad dapat melihat untuk kolaborasi/supervisi
 -- Modifikasi: Guru pemilik penugasan atau Admin

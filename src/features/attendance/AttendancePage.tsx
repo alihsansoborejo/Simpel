@@ -1,7 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { attendanceService } from '../../services/attendanceService';
 import { academicService } from '../../services/academicService';
-import { Student, ClassRoom, AttendanceStatus, ClassMember, Teacher } from '../../types/database.types';
+import {
+  Student,
+  ClassRoom,
+  AttendanceStatus,
+  ClassMember,
+  Teacher,
+  SystemSettings,
+} from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { printDocumentDirectly } from '../../services/printService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
@@ -29,8 +36,12 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
   const [classes, setClasses] = useState<ClassRoom[]>([]);
   const [allStudents, setAllStudents] = useState<Student[]>([]);
   const [classMembers, setClassMembers] = useState<ClassMember[]>([]);
-  const [homeroomClassId, setHomeroomClassId] = useState<string>('cls-4');
-  const [selectedClassId, setSelectedClassId] = useState<string>('cls-4');
+  const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [activeAcademicYearId, setActiveAcademicYearId] = useState<string>('');
+  const [activeSemesterId, setActiveSemesterId] = useState<string>('');
+  const [homeroomClassId, setHomeroomClassId] = useState<string>('');
+  const [selectedClassId, setSelectedClassId] = useState<string>('');
   const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -44,38 +55,56 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
   const loadInitialData = async () => {
     setIsLoading(true);
     try {
-      const [clss, stds, cm, hrs] = await Promise.all([
+      const [clss, stds, cm, sysSettings, years, sems, teacher] = await Promise.all([
         academicService.getClasses(),
         academicService.getStudents(),
         academicService.getClassMembers(),
-        academicService.getHomeroomAssignments(),
+        academicService.getSettings(),
+        academicService.getAcademicYears(),
+        academicService.getSemesters(),
+        academicService.resolveTeacherForUser(user),
       ]);
 
       setClasses(clss);
       setAllStudents(stds);
       setClassMembers(cm);
+      setSettings(sysSettings);
+      setResolvedTeacher(teacher);
+
+      const activeYear =
+        years.find((y) => y.id === sysSettings.active_academic_year_id) ||
+        years.find((y) => y.is_active) ||
+        years[0];
+      const activeSem =
+        sems.find((s) => s.id === sysSettings.active_semester_id) ||
+        sems.find((s) => s.is_active) ||
+        sems[0];
+
+      setActiveAcademicYearId(activeYear?.id || '');
+      setActiveSemesterId(activeSem?.id || '');
 
       // Tentukan rombel wali kelas pengguna aktif
-      let userHrClass = 'cls-4';
-      if (user?.teacherId) {
-        const foundHr = hrs.find((h) => h.teacher_id === user.teacherId);
-        if (foundHr) {
-          userHrClass = foundHr.class_id;
-        } else {
-          const classWithHr = clss.find((c) => c.homeroom_teacher_id === user.teacherId);
-          if (classWithHr) userHrClass = classWithHr.id;
-        }
-      } else if (user?.homeroomClassId) {
-        userHrClass = user.homeroomClassId;
-      }
-
+      const hrClass = await academicService.resolveHomeroomClassForUser(user, teacher);
+      const userHrClass = hrClass?.id || '';
       setHomeroomClassId(userHrClass);
 
       // Jika role wali_kelas, kunci ke rombel binaannya
-      const activeClass = activeRole === 'wali_kelas' ? userHrClass : selectedClassId || 'cls-4';
+      const activeClass =
+        activeRole === 'wali_kelas'
+          ? userHrClass
+          : (selectedClassId && clss.some((c) => c.id === selectedClassId)
+              ? selectedClassId
+              : '') ||
+            userHrClass ||
+            clss[0]?.id ||
+            '';
       setSelectedClassId(activeClass);
 
-      await loadAttendanceForClass(activeClass, selectedDate, stds, cm);
+      if (activeClass) {
+        await loadAttendanceForClass(activeClass, selectedDate, stds, cm);
+      } else {
+        setAttendanceMap({});
+      }
     } catch (err) {
       console.error('Gagal memuat data awal presensi:', err);
     } finally {
@@ -89,6 +118,10 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
     studentsPool: Student[],
     membersPool: ClassMember[]
   ) => {
+    if (!classId) {
+      setAttendanceMap({});
+      return;
+    }
     try {
       // Dapatkan siswa yang terdaftar di rombel ini
       const enrolledStudentIds = membersPool
@@ -96,9 +129,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
         .map((m) => m.student_id);
 
       // Siswa rombel
-      const classStudents = studentsPool.filter(
-        (s) => enrolledStudentIds.includes(s.id) || (classId === 'cls-4' && enrolledStudentIds.length === 0)
-      );
+      const classStudents = studentsPool.filter((s) => enrolledStudentIds.includes(s.id));
 
       const existing = await attendanceService.getAttendance({
         classId,
@@ -120,17 +151,28 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
   };
 
   useEffect(() => {
-    loadInitialData();
-  }, [activeRole]);
+    void loadInitialData();
+  }, [activeRole, user?.id]);
 
   useEffect(() => {
-    if (allStudents.length > 0) {
-      loadAttendanceForClass(selectedClassId, selectedDate, allStudents, classMembers);
+    if (selectedClassId && allStudents.length > 0) {
+      void loadAttendanceForClass(selectedClassId, selectedDate, allStudents, classMembers);
     }
   }, [selectedClassId, selectedDate]);
 
   useRealtimeSync(
-    ['simpel_student_attendance', 'simpel_attendances', 'simpel_students', 'simpel_classes', 'simpel_class_members', 'simpel_homeroom_assignments'],
+    [
+      'simpel_student_attendance',
+      'simpel_attendances',
+      'simpel_students',
+      'simpel_classes',
+      'simpel_class_members',
+      'simpel_homeroom_assignments',
+      'simpel_teachers',
+      'simpel_settings',
+      'simpel_academic_years',
+      'simpel_semesters',
+    ],
     () => {
       void loadInitialData();
     }
@@ -141,15 +183,15 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
     .filter((m) => m.class_id === selectedClassId)
     .map((m) => m.student_id);
 
-  const displayedStudents = allStudents.filter(
-    (s) => targetMemberIds.includes(s.id) || (selectedClassId === 'cls-4' && targetMemberIds.length === 0)
-  );
+  const displayedStudents = selectedClassId
+    ? allStudents.filter((s) => targetMemberIds.includes(s.id))
+    : [];
 
   const currentClass = classes.find((c) => c.id === selectedClassId) || {
     id: selectedClassId,
-    name: 'Kelas 4',
-    level: 4,
-    phase: 'B',
+    name: selectedClassId ? 'Rombel Terpilih' : 'Belum Ada Rombel',
+    level: 0,
+    phase: 'B' as const,
   };
 
   const isHomeroomLocked = activeRole === 'wali_kelas';
@@ -186,6 +228,7 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
   };
 
   const handleSaveAttendance = async () => {
+    if (!selectedClassId) return;
     setIsSaving(true);
     try {
       const payload = displayedStudents.map((s) => ({
@@ -194,9 +237,9 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
         date: selectedDate,
         status: attendanceMap[s.id]?.status || 'Hadir',
         notes: attendanceMap[s.id]?.notes || null,
-        recordedBy: user?.id || 'usr-guru-1',
-        academicYearId: 'ay-2026',
-        semesterId: 'sem-ganjil-2026',
+        recordedBy: user?.id || resolvedTeacher?.id || '',
+        academicYearId: activeAcademicYearId || 'ay-2026',
+        semesterId: activeSemesterId || 'sem-ganjil-2026',
       }));
 
       await attendanceService.recordAttendance(payload);
@@ -209,6 +252,10 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
       setIsSaving(false);
     }
   };
+
+  const teacherDisplayName = resolvedTeacher
+    ? `${resolvedTeacher.title_prefix || ''} ${resolvedTeacher.full_name} ${resolvedTeacher.title_suffix || ''}`.trim()
+    : user?.profile?.full_name || 'Wali Kelas';
 
   // Cetak Dokumen Presensi Siap Cetak
   const handlePrintAttendance = () => {
@@ -247,6 +294,9 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
     printDocumentDirectly(contentHtml, {
       title: 'DAFTAR PRESENSI HARIAN PESERTA DIDIK',
       subtitle: `${currentClass.name} (Fase ${currentClass.phase}) - Tanggal: ${selectedDate}`,
+      schoolName: settings?.school_name,
+      schoolAddress: settings?.address,
+      logoUrl: settings?.logo_url || undefined,
       metadata: [
         { label: 'Rombongan Belajar', value: currentClass.name },
         { label: 'Fase Kurikulum', value: `Fase ${currentClass.phase}` },
@@ -255,12 +305,12 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
       ],
       signature: {
         leftTitle: 'Wali Kelas,',
-        leftName: user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I',
-        leftNip: '198503122019031008',
+        leftName: teacherDisplayName,
+        leftNip: resolvedTeacher?.nip || '-',
         rightCityDate: `Temanggung, ${new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}`,
         rightTitle: 'Mengetahui,<br>Kepala Madrasah,',
-        rightName: 'MUIN, S.Pd.I',
-        rightNip: '197508152005011004',
+        rightName: settings?.principal_name || 'Kepala Madrasah',
+        rightNip: settings?.principal_nip || '-',
       },
     });
   };
@@ -355,14 +405,26 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
       )}
 
       {/* Banner Khusus Wali Kelas */}
-      {isHomeroomLocked && (
+      {isHomeroomLocked && !homeroomClassId && (
+        <div className="flex items-start gap-2.5 p-3.5 text-xs text-amber-900 bg-amber-50 rounded-xl border border-amber-200">
+          <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />
+          <div>
+            <p className="font-bold">Belum Ada Rombel Binaan Wali Kelas</p>
+            <p className="text-[11px] text-amber-800 mt-0.5">
+              Admin belum menetapkan rombongan belajar binaan untuk akun Wali Kelas Anda di menu Penugasan Wali Kelas.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {isHomeroomLocked && homeroomClassId && (
         <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 flex items-center justify-between text-xs text-emerald-950">
           <div className="flex items-center gap-2.5">
             <School className="w-5 h-5 text-emerald-700 shrink-0" />
             <div>
               <span className="font-bold">Rombel Binaan: {currentClass.name} (Fase {currentClass.phase})</span>
               <p className="text-[11px] text-emerald-800">
-                Wali Kelas: <strong>{user?.profile?.full_name || 'Ust. Ahmad Fauzi, S.Pd.I'}</strong> — Data kehadiran otomatis terekap ke Buku Rapor semester aktif.
+                Wali Kelas: <strong>{teacherDisplayName}</strong> — Data kehadiran otomatis terekap ke Buku Rapor semester aktif.
               </p>
             </div>
           </div>

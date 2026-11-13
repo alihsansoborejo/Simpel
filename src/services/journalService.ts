@@ -1,8 +1,11 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 import { TeachingJournal } from '../types/database.types';
 import { DEMO_JOURNALS } from '../lib/demoData';
+import { academicService } from './academicService';
 
 const STORAGE_KEY = 'simpel_teaching_journals';
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v?: string | null) => typeof v === 'string' && UUID_REGEX.test(v);
 
 function getLocal<T>(key: string, fallback: T): T {
   try {
@@ -23,53 +26,73 @@ function setLocal<T>(key: string, value: T): void {
 
 export const journalService = {
   async getJournals(filters?: { assignmentId?: string; date?: string; teacherId?: string }): Promise<TeachingJournal[]> {
+    let baseJournals = getLocal<TeachingJournal[]>(STORAGE_KEY, DEMO_JOURNALS);
+
     if (isSupabaseConfigured) {
       try {
-        let query = supabase
+        const { data, error } = await supabase
           .from('teaching_journals')
           .select('*, assignment:teaching_assignments(*, teacher:teachers(*), class:classes(*), subject:subjects(*))')
           .order('date', { ascending: false });
 
-        if (filters?.assignmentId) query = query.eq('assignment_id', filters.assignmentId);
-        if (filters?.date) query = query.eq('date', filters.date);
-
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) return data as TeachingJournal[];
+        if (!error && Array.isArray(data) && data.length > 0) {
+          const seenIds = new Set(baseJournals.map((j) => j.id));
+          const merged = [...baseJournals];
+          for (const item of data as TeachingJournal[]) {
+            if (!seenIds.has(item.id)) {
+              merged.push(item);
+              seenIds.add(item.id);
+            }
+          }
+          baseJournals = merged;
+        }
       } catch (err) {
         console.warn('Supabase getJournals fallback:', err);
       }
     }
 
-    let journals = getLocal<TeachingJournal[]>(STORAGE_KEY, DEMO_JOURNALS);
-    if (filters?.assignmentId) journals = journals.filter((j) => j.assignment_id === filters.assignmentId);
-    if (filters?.date) journals = journals.filter((j) => j.date === filters.date);
+    const assignments = await academicService.getTeachingAssignments();
+    let hydrated = baseJournals.map((j) => ({
+      ...j,
+      assignment: assignments.find((a) => a.id === j.assignment_id) || j.assignment,
+    }));
+
+    if (filters?.assignmentId) hydrated = hydrated.filter((j) => j.assignment_id === filters.assignmentId);
+    if (filters?.date) hydrated = hydrated.filter((j) => j.date === filters.date);
     if (filters?.teacherId) {
-      journals = journals.filter((j) => j.assignment?.teacher_id === filters.teacherId);
+      hydrated = hydrated.filter((j) => j.assignment?.teacher_id === filters.teacherId);
     }
-    return journals;
+
+    return hydrated.sort((a, b) => b.date.localeCompare(a.date));
   },
 
   async createJournal(payload: Omit<TeachingJournal, 'id' | 'created_at' | 'updated_at'>): Promise<TeachingJournal> {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `jrn-${Date.now()}`;
-    const newJournal: TeachingJournal = {
+    const assignments = await academicService.getTeachingAssignments();
+    const matchedAssignment = assignments.find((a) => a.id === payload.assignment_id);
+
+    let newJournal: TeachingJournal = {
       ...payload,
       id,
+      assignment: matchedAssignment,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id) && isUuid(payload.assignment_id)) {
       try {
         const { assignment: _a, ...dbPayload } = newJournal;
         const { data } = await supabase.from('teaching_journals').insert(dbPayload).select().single();
-        if (data) return data as TeachingJournal;
+        if (data) {
+          newJournal = { ...(data as TeachingJournal), assignment: matchedAssignment };
+        }
       } catch (err) {
         console.warn('Supabase createJournal fallback:', err);
       }
     }
 
-    const current = await this.getJournals();
-    const updated = [newJournal, ...current];
+    const current = getLocal<TeachingJournal[]>(STORAGE_KEY, DEMO_JOURNALS);
+    const updated = [newJournal, ...current.filter((j) => j.id !== newJournal.id)];
     setLocal(STORAGE_KEY, updated);
     return newJournal;
   },
@@ -85,28 +108,33 @@ export const journalService = {
       updated_at: new Date().toISOString(),
     };
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id)) {
       try {
-        await supabase.from('teaching_journals').update(updates).eq('id', id);
+        const { assignment: _a, ...dbUpdates } = updates;
+        await supabase.from('teaching_journals').update(dbUpdates).eq('id', id);
       } catch (err) {
         console.warn('Supabase updateJournal fallback:', err);
       }
     }
 
-    const updated = journals.map((j) => (j.id === id ? updatedJournal : j));
+    const current = getLocal<TeachingJournal[]>(STORAGE_KEY, DEMO_JOURNALS);
+    const updated = current.some((j) => j.id === id)
+      ? current.map((j) => (j.id === id ? updatedJournal : j))
+      : [updatedJournal, ...current];
     setLocal(STORAGE_KEY, updated);
     return updatedJournal;
   },
 
   async deleteJournal(id: string): Promise<void> {
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id)) {
       try {
         await supabase.from('teaching_journals').delete().eq('id', id);
       } catch (err) {
         console.warn('Supabase deleteJournal fallback:', err);
       }
     }
-    const journals = await this.getJournals();
-    setLocal(STORAGE_KEY, journals.filter((j) => j.id !== id));
+    const current = getLocal<TeachingJournal[]>(STORAGE_KEY, DEMO_JOURNALS);
+    setLocal(STORAGE_KEY, current.filter((j) => j.id !== id));
   },
 };
+

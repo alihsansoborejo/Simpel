@@ -837,9 +837,96 @@ export const curriculumWorkspaceService = {
   },
 
   // === LINGKUP MATERI (LM) & STS / SAS ===
-  getLingkupMateriList(subjectId = 'sbj-ind', classLevel = 4): LingkupMateriConfig[] {
-    return LINGKUP_MATERI_CONFIGS.filter(
+  getLingkupMateriList(subjectId = 'sbj-ind', classLevel = 4, semester: 'Ganjil' | 'Genap' = 'Ganjil'): LingkupMateriConfig[] {
+    const staticMatches = LINGKUP_MATERI_CONFIGS.filter(
       (lm) => lm.subject_id === subjectId && lm.class_level === classLevel
     );
+    if (staticMatches.length > 0) return staticMatches;
+
+    // Bangun secara dinamis untuk seluruh mata pelajaran dan kelas (1-6)
+    const tpItems = this.getTPList().filter(
+      (tp) => tp.subject_id === subjectId && tp.class_level === classLevel
+    );
+    const tpCode = (idx: number) => tpItems[idx]?.code || `TP ${classLevel}.${idx + 1}`;
+    const allTpCodes = tpItems.length > 0
+      ? tpItems.slice(0, 4).map((t) => t.code)
+      : [`TP ${classLevel}.1`, `TP ${classLevel}.2`, `TP ${classLevel}.3`, `TP ${classLevel}.4`];
+
+    return [
+      {
+        id: `lm-${subjectId}-${classLevel}-1`,
+        scope_key: 'LM1',
+        code: 'LM 1',
+        label: 'Lingkup Materi 1',
+        title: tpItems[0]?.scope_of_material || `Lingkup Materi 1 (Kelas ${classLevel})`,
+        subject_id: subjectId,
+        class_level: classLevel,
+        semester,
+        associated_tps: [tpCode(0)],
+        description: `Evaluasi formatif & sumatif lingkup materi 1 untuk Kelas ${classLevel}.`,
+      },
+      {
+        id: `lm-${subjectId}-${classLevel}-2`,
+        scope_key: 'LM2',
+        code: 'LM 2',
+        label: 'Lingkup Materi 2',
+        title: tpItems[1]?.scope_of_material || `Lingkup Materi 2 (Kelas ${classLevel})`,
+        subject_id: subjectId,
+        class_level: classLevel,
+        semester,
+        associated_tps: [tpCode(1)],
+        description: `Evaluasi formatif & sumatif lingkup materi 2 untuk Kelas ${classLevel}.`,
+      },
+      {
+        id: `lm-${subjectId}-${classLevel}-sts`,
+        scope_key: 'STS',
+        code: 'STS',
+        label: `Sumatif Tengah Semester (${semester})`,
+        title: `Sumatif Tengah Semester (STS ${semester})`,
+        subject_id: subjectId,
+        class_level: classLevel,
+        semester,
+        associated_tps: [tpCode(0), tpCode(1)],
+        description: `Asesmen sumatif tengah semester untuk mengukur capaian materi paruh pertama semester ${semester.toLowerCase()}.`,
+        is_special_summative: true,
+      },
+      {
+        id: `lm-${subjectId}-${classLevel}-3`,
+        scope_key: 'LM3',
+        code: 'LM 3',
+        label: 'Lingkup Materi 3',
+        title: tpItems[2]?.scope_of_material || `Lingkup Materi 3 (Kelas ${classLevel})`,
+        subject_id: subjectId,
+        class_level: classLevel,
+        semester,
+        associated_tps: [tpCode(2)],
+        description: `Evaluasi formatif & sumatif lingkup materi 3 untuk Kelas ${classLevel}.`,
+      },
+      {
+        id: `lm-${subjectId}-${classLevel}-4`,
+        scope_key: 'LM4',
+        code: 'LM 4',
+        label: 'Lingkup Materi 4',
+        title: tpItems[3]?.scope_of_material || `Lingkup Materi 4 (Kelas ${classLevel})`,
+        subject_id: subjectId,
+        class_level: classLevel,
+        semester,
+        associated_tps: [tpCode(3)],
+        description: `Evaluasi formatif & sumatif lingkup materi 4 untuk Kelas ${classLevel}.`,
+      },
+      {
+        id: `lm-${subjectId}-${classLevel}-sas`,
+        scope_key: 'SAS',
+        code: 'SAS',
+        label: `Sumatif Akhir Semester (${semester})`,
+        title: `Sumatif Akhir Semester (SAS ${semester})`,
+        subject_id: subjectId,
+        class_level: classLevel,
+        semester,
+        associated_tps: allTpCodes,
+        description: `Asesmen sumatif akhir semester komprehensif penentu capaian rapor semester ${semester.toLowerCase()}.`,
+        is_special_summative: true,
+      },
+    ];
   },
 };

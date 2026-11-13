@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import { fetchHomeroomDashboardData, HomeroomDashboardData } from '../../services/dashboardService';
 import { StatCard } from '../../components/ui/StatCard';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
@@ -19,12 +20,13 @@ interface HomeroomDashboardProps {
 }
 
 export const HomeroomDashboard: React.FC<HomeroomDashboardProps> = ({ onNavigate }) => {
+  const { user } = useAuth();
   const [data, setData] = useState<HomeroomDashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   const loadData = async () => {
     try {
-      const res = await fetchHomeroomDashboardData();
+      const res = await fetchHomeroomDashboardData(user?.homeroomClassId, user);
       setData(res);
     } catch (err) {
       console.error('Error loading homeroom dashboard:', err);
@@ -35,7 +37,7 @@ export const HomeroomDashboard: React.FC<HomeroomDashboardProps> = ({ onNavigate
 
   useEffect(() => {
     void loadData();
-  }, []);
+  }, [user]);
 
   useRealtimeSync('*', () => {
     void loadData();
@@ -146,31 +148,37 @@ export const HomeroomDashboard: React.FC<HomeroomDashboardProps> = ({ onNavigate
           </div>
 
           <div className="divide-y divide-slate-100">
-            {data.gradeCompletenessStatus.map((subj, idx) => (
-              <div key={idx} className="py-3 flex items-center justify-between text-xs">
-                <div>
-                  <p className="font-semibold text-slate-900">{subj.subjectName}</p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">Pengampu: {subj.teacherName}</p>
-                </div>
+            {data.gradeCompletenessStatus.length === 0 ? (
+              <p className="py-6 text-center text-xs text-slate-400">
+                Belum ada mata pelajaran yang ditugaskan pada rombel ini.
+              </p>
+            ) : (
+              data.gradeCompletenessStatus.map((subj, idx) => (
+                <div key={idx} className="py-3 flex items-center justify-between text-xs">
+                  <div>
+                    <p className="font-semibold text-slate-900">{subj.subjectName}</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">Pengampu: {subj.teacherName}</p>
+                  </div>
 
-                <div className="flex items-center gap-3">
-                  <span className="font-mono-numbers text-slate-600 text-[11px]">
-                    {subj.gradedStudentsCount}/{subj.totalStudents} siswa
-                  </span>
-                  {subj.isComplete ? (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 text-[11px] font-semibold border border-emerald-200">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>Lengkap</span>
+                  <div className="flex items-center gap-3">
+                    <span className="font-mono-numbers text-slate-600 text-[11px]">
+                      {subj.gradedStudentsCount}/{subj.totalStudents} siswa
                     </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-50 text-amber-800 text-[11px] font-semibold border border-amber-200">
-                      <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
-                      <span>Belum Tuntas</span>
-                    </span>
-                  )}
+                    {subj.isComplete ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 text-[11px] font-semibold border border-emerald-200">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Lengkap</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-50 text-amber-800 text-[11px] font-semibold border border-amber-200">
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Belum Tuntas</span>
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
 
           <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">

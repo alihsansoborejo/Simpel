@@ -1,18 +1,25 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { curriculumService } from '../../services/curriculumService';
-import { DocumentLink, DocumentStatus } from '../../types/database.types';
+import { academicService } from '../../services/academicService';
+import {
+  DocumentLink,
+  DocumentStatus,
+  ClassRoom,
+  Subject,
+  TeachingAssignment,
+  Teacher,
+} from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { useWorkspace } from '../../context/WorkspaceContext';
 import { useGoogleDrive } from '../../context/GoogleDriveContext';
 import { fileStorageService } from '../../services/fileStorageService';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   FolderSync,
   ExternalLink,
-  Plus,
   CheckCircle,
   Clock,
   AlertCircle,
-  FileText,
   Send,
   MessageSquare,
   Search,
@@ -22,7 +29,14 @@ import {
 
 export const CurriculumDocsPage: React.FC = () => {
   const { user, activeRole } = useAuth();
+  const { selectedSubjectId, selectedClassId } = useWorkspace();
   const [documents, setDocuments] = useState<DocumentLink[]>([]);
+  const [classes, setClasses] = useState<ClassRoom[]>([]);
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
+  const [resolvedTeacher, setResolvedTeacher] = useState<Teacher | null>(null);
+  const [activeYearId, setActiveYearId] = useState<string>('ay-2026');
+  const [activeSemesterId, setActiveSemesterId] = useState<string>('sem-ganjil-2026');
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
@@ -35,37 +49,99 @@ export const CurriculumDocsPage: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Google Drive Context
-  const { isConnected, isConnecting, connect, uploadFile, googleUser } = useGoogleDrive();
+  const { isConnected, isConnecting, connect, googleUser } = useGoogleDrive();
   const [modalTab, setModalTab] = useState<'upload' | 'url'>('upload');
   const [fileToUpload, setFileToUpload] = useState<File | null>(null);
   const [isUploadingToDrive, setIsUploadingToDrive] = useState<boolean>(false);
 
   // Form State
   const [docType, setDocType] = useState<string>('Modul Ajar');
+  const [docClassId, setDocClassId] = useState<string>(selectedClassId || '');
+  const [docSubjectId, setDocSubjectId] = useState<string>(selectedSubjectId || '');
   const [title, setTitle] = useState<string>('');
   const [driveUrl, setDriveUrl] = useState<string>('');
 
-  const loadDocs = async () => {
+  const loadDocs = useCallback(async () => {
     setIsLoading(true);
     try {
-      const data = await curriculumService.getDocuments();
+      const [data, clss, sbjs, asgs, sys, years, sems, teacher] = await Promise.all([
+        curriculumService.getDocuments(),
+        academicService.getClasses(),
+        academicService.getSubjects(),
+        academicService.getTeachingAssignments(),
+        academicService.getSettings(),
+        academicService.getAcademicYears(),
+        academicService.getSemesters(),
+        academicService.resolveTeacherForUser(user),
+      ]);
       setDocuments(data);
+      setClasses(clss);
+      setSubjects(sbjs);
+      setResolvedTeacher(teacher);
+
+      const actYear = years.find((y) => y.id === sys.active_academic_year_id || y.is_active) || years[0];
+      const actSem = sems.find((s) => s.id === sys.active_semester_id || s.is_active) || sems[0];
+      if (actYear?.id) setActiveYearId(actYear.id);
+      if (actSem?.id) setActiveSemesterId(actSem.id);
+
+      const relevantAsgs =
+        activeRole === 'guru'
+          ? teacher
+            ? asgs.filter((a) => a.teacher_id === teacher.id)
+            : []
+          : asgs;
+      setAssignments(relevantAsgs);
+
+      if (activeRole === 'guru' && relevantAsgs.length > 0) {
+        const matchedAsg =
+          relevantAsgs.find(
+            (a) =>
+              (!selectedSubjectId || a.subject_id === selectedSubjectId) &&
+              (!selectedClassId || a.class_id === selectedClassId)
+          ) || relevantAsgs[0];
+        setDocClassId((prev) => prev || matchedAsg.class_id);
+        setDocSubjectId((prev) => prev || matchedAsg.subject_id);
+      } else {
+        setDocClassId((prev) => prev || selectedClassId || clss[0]?.id || '');
+        setDocSubjectId((prev) => prev || selectedSubjectId || sbjs[0]?.id || '');
+      }
     } catch (err) {
       console.error('Gagal memuat dokumen kurikulum:', err);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [activeRole, user?.id, user?.teacherId, selectedClassId, selectedSubjectId]);
 
   useEffect(() => {
-    loadDocs();
-  }, []);
-
-  useRealtimeSync(['simpel_curriculum_documents', 'simpel_curriculum_reviews'], () => {
     void loadDocs();
-  }, true);
+  }, [loadDocs]);
+
+  useEffect(() => {
+    if (selectedClassId) setDocClassId(selectedClassId);
+    if (selectedSubjectId) setDocSubjectId(selectedSubjectId);
+  }, [selectedClassId, selectedSubjectId]);
+
+  useRealtimeSync(
+    ['simpel_curriculum_documents', 'simpel_curriculum_reviews', 'simpel_assignments', 'simpel_classes', 'simpel_subjects'],
+    () => {
+      void loadDocs();
+    },
+    true
+  );
 
   const DRIVE_REGEX = /^(https?:\/\/)?(drive|docs)\.google\.com\/(file\/d\/|document\/d\/|spreadsheets\/d\/|presentation\/d\/|drive\/folders\/|open\?id=|[a-zA-Z0-9_-]+).*/i;
+
+  const modalClasses =
+    activeRole === 'guru'
+      ? classes.filter((c) => assignments.some((a) => a.class_id === c.id))
+      : classes;
+
+  const modalSubjects =
+    activeRole === 'guru'
+      ? subjects.filter((s) =>
+          assignments.some((a) => a.subject_id === s.id && (!docClassId || a.class_id === docClassId))
+        )
+      : subjects;
 
   const handleDirectUploadToDrive = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,17 +162,17 @@ export const CurriculumDocsPage: React.FC = () => {
         file: fileToUpload,
         name: fileNameToUse,
         category: docType,
-        uploadedBy: user?.profile.full_name || 'Guru Madrasah',
+        uploadedBy: user?.profile.full_name || resolvedTeacher?.full_name || 'Guru Madrasah',
       });
 
       const finalDriveUrl = saved.googleDriveUrl || config.sharedFolderUrl || 'https://drive.google.com';
 
       await curriculumService.createDocument({
-        teacher_id: user?.teacherId || 'tch-1',
-        academic_year_id: 'ay-2026',
-        semester_id: 'sem-ganjil-2026',
-        class_id: 'cls-4',
-        subject_id: 'sbj-ind',
+        teacher_id: resolvedTeacher?.id || user?.teacherId || user?.id || '',
+        academic_year_id: activeYearId,
+        semester_id: activeSemesterId,
+        class_id: docClassId || classes[0]?.id || '',
+        subject_id: docSubjectId || subjects[0]?.id || '',
         document_type: docType,
         title: cleanTitle,
         google_drive_url: finalDriveUrl,
@@ -110,7 +186,7 @@ export const CurriculumDocsPage: React.FC = () => {
       setDriveUrl('');
       setFileToUpload(null);
       setStatusMessage(`Berkas "${fileNameToUse}" berhasil diunggah dan disimpan di sistem!`);
-      loadDocs();
+      void loadDocs();
       setTimeout(() => setStatusMessage(null), 4000);
     } catch (err: any) {
       alert(`Gagal menyimpan berkas: ${err?.message || 'Terjadi kesalahan'}`);
@@ -129,11 +205,11 @@ export const CurriculumDocsPage: React.FC = () => {
 
     try {
       await curriculumService.createDocument({
-        teacher_id: user?.teacherId || 'tch-1',
-        academic_year_id: 'ay-2026',
-        semester_id: 'sem-ganjil-2026',
-        class_id: 'cls-4',
-        subject_id: 'sbj-ind',
+        teacher_id: resolvedTeacher?.id || user?.teacherId || user?.id || '',
+        academic_year_id: activeYearId,
+        semester_id: activeSemesterId,
+        class_id: docClassId || classes[0]?.id || '',
+        subject_id: docSubjectId || subjects[0]?.id || '',
         document_type: docType,
         title,
         google_drive_url: driveUrl.trim(),
@@ -145,7 +221,7 @@ export const CurriculumDocsPage: React.FC = () => {
       setTitle('');
       setDriveUrl('');
       setStatusMessage('Tautan berkas Google Drive berhasil disimpan sebagai draf.');
-      loadDocs();
+      void loadDocs();
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (err) {
       console.error('Gagal menyimpan dokumen:', err);
@@ -156,7 +232,7 @@ export const CurriculumDocsPage: React.FC = () => {
     try {
       await curriculumService.submitDocument(id);
       setStatusMessage(`Dokumen "${docTitle}" telah diajukan ke Kepala Madrasah untuk ditelaah.`);
-      loadDocs();
+      void loadDocs();
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (err) {
       console.error('Gagal mengajukan dokumen:', err);
@@ -175,7 +251,7 @@ export const CurriculumDocsPage: React.FC = () => {
       );
       setShowReviewModal(false);
       setStatusMessage(`Telaah dokumen selesai: Status diperbarui menjadi "${reviewDecision}".`);
-      loadDocs();
+      void loadDocs();
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (err) {
       console.error('Gagal mereview dokumen:', err);
@@ -183,6 +259,11 @@ export const CurriculumDocsPage: React.FC = () => {
   };
 
   const filteredDocs = documents.filter((d) => {
+    if (activeRole === 'guru') {
+      const teacherId = resolvedTeacher?.id || user?.teacherId;
+      if (!teacherId) return false;
+      if (d.teacher_id !== teacherId && d.teacher?.id !== teacherId) return false;
+    }
     if (statusFilter !== 'all' && d.status !== statusFilter) return false;
     if (typeFilter !== 'all' && d.document_type !== typeFilter) return false;
     if (searchTerm && !d.title.toLowerCase().includes(searchTerm.toLowerCase())) return false;
@@ -375,13 +456,16 @@ export const CurriculumDocsPage: React.FC = () => {
                       <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5">
                         <span className="font-semibold text-emerald-800">{doc.document_type}</span>
                         <span aria-hidden="true">·</span>
-                        <span>Kelas 4 · Bahasa Indonesia</span>
+                        <span>
+                          {doc.class?.name || classes.find((c) => c.id === doc.class_id)?.name || 'Kelas'} ·{' '}
+                          {doc.subject?.name || subjects.find((s) => s.id === doc.subject_id)?.name || 'Mata Pelajaran'}
+                        </span>
                       </div>
                     </td>
                     <td className="py-3 px-4 font-medium text-slate-800">
                       {doc.teacher
-                        ? `${doc.teacher.title_prefix || ''} ${doc.teacher.full_name} ${doc.teacher.title_suffix || ''}`
-                        : 'Ust. Ahmad Fauzi, S.Pd.I'}
+                        ? `${doc.teacher.title_prefix || ''} ${doc.teacher.full_name} ${doc.teacher.title_suffix || ''}`.trim()
+                        : 'Guru Madrasah'}
                     </td>
                     <td className="py-3 px-4">
                       <a
@@ -507,6 +591,46 @@ export const CurriculumDocsPage: React.FC = () => {
                       />
                     </div>
 
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">Kelas / Rombel</label>
+                        <select
+                          value={docClassId}
+                          onChange={(e) => {
+                            const nextCls = e.target.value;
+                            setDocClassId(nextCls);
+                            if (activeRole === 'guru') {
+                              const firstSbj = assignments.find((a) => a.class_id === nextCls)?.subject_id;
+                              if (firstSbj) setDocSubjectId(firstSbj);
+                            }
+                          }}
+                          className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
+                          required
+                        >
+                          {modalClasses.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">Mata Pelajaran</label>
+                        <select
+                          value={docSubjectId}
+                          onChange={(e) => setDocSubjectId(e.target.value)}
+                          className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
+                          required
+                        >
+                          {modalSubjects.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis Perangkat Kurikulum</label>
                       <select
@@ -529,7 +653,7 @@ export const CurriculumDocsPage: React.FC = () => {
                       <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Dokumen</label>
                       <input
                         type="text"
-                        placeholder="Contoh: Modul Ajar IPAS Bab 2 Siklus Makhluk Hidup"
+                        placeholder="Contoh: Modul Ajar Bab 2"
                         value={title}
                         onChange={(e) => setTitle(e.target.value)}
                         className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600"
@@ -557,6 +681,46 @@ export const CurriculumDocsPage: React.FC = () => {
                   </form>
             ) : (
               <form onSubmit={handleCreateDocument} className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Kelas / Rombel</label>
+                    <select
+                      value={docClassId}
+                      onChange={(e) => {
+                        const nextCls = e.target.value;
+                        setDocClassId(nextCls);
+                        if (activeRole === 'guru') {
+                          const firstSbj = assignments.find((a) => a.class_id === nextCls)?.subject_id;
+                          if (firstSbj) setDocSubjectId(firstSbj);
+                        }
+                      }}
+                      className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
+                      required
+                    >
+                      {modalClasses.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Mata Pelajaran</label>
+                    <select
+                      value={docSubjectId}
+                      onChange={(e) => setDocSubjectId(e.target.value)}
+                      className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600 bg-white"
+                      required
+                    >
+                      {modalSubjects.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis Perangkat Kurikulum</label>
                   <select
@@ -579,7 +743,7 @@ export const CurriculumDocsPage: React.FC = () => {
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Dokumen</label>
                   <input
                     type="text"
-                    placeholder="Contoh: Modul Ajar IPAS Bab 2 Siklus Makhluk Hidup"
+                    placeholder="Contoh: Modul Ajar Bab 2"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     className="w-full text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-emerald-600"
