@@ -5,6 +5,7 @@ import {
   bulkCreateUsersFromCSV,
   updateUserAndTeacher,
   deleteUser,
+  getDemoUsers,
   UserListItem,
   CreateUserData,
 } from '../../services/userService';
@@ -51,6 +52,7 @@ interface CSVPreviewRow {
   phone_number: string;
   specialization: string;
   roles: UserRole[];
+  alreadyRegistered?: boolean;
   status: 'valid' | 'warning' | 'error';
   messages: string[];
 }
@@ -103,6 +105,7 @@ export const UserManagementPage: React.FC = () => {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvRows, setCsvRows] = useState<CSVPreviewRow[]>([]);
+  const [updateExistingOnImport, setUpdateExistingOnImport] = useState(true);
   const [importError, setImportError] = useState<string | null>(null);
   const [importSummary, setImportSummary] = useState<{
     total: number;
@@ -241,7 +244,7 @@ export const UserManagementPage: React.FC = () => {
   // Ekspor Seluruh Data Akun Lengkap ke CSV
   const exportUsersCSV = () => {
     if (users.length === 0) {
-      alert('Tidak ada data akun pengguna untuk diekspor.');
+      setNotification({ type: 'error', message: 'Tidak ada data akun pengguna untuk diekspor.' });
       return;
     }
 
@@ -379,7 +382,10 @@ export const UserManagementPage: React.FC = () => {
         return;
       }
 
-      const existingEmailSet = new Set(users.map((u) => u.email.trim().toLowerCase()));
+      const existingEmailSet = new Set([
+        ...users.map((u) => u.email.trim().toLowerCase()),
+        ...getDemoUsers().map((u) => u.email.trim().toLowerCase()),
+      ]);
       const seenCsvEmails = new Map<string, number>();
       const parsedList: CSVPreviewRow[] = [];
 
@@ -423,6 +429,7 @@ export const UserManagementPage: React.FC = () => {
 
         const messages: string[] = [];
         let status: 'valid' | 'warning' | 'error' = 'valid';
+        let alreadyRegistered = false;
 
         if (!email) {
           status = 'error';
@@ -430,14 +437,21 @@ export const UserManagementPage: React.FC = () => {
         } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
           status = 'error';
           messages.push(`Format email "${email}" tidak valid (contoh: nama@alihsan.sch.id).`);
-        } else if (existingEmailSet.has(normalizedEmail)) {
-          status = 'error';
-          messages.push(`Email "${email}" sudah terdaftar di sistem.`);
         } else if (seenCsvEmails.has(normalizedEmail)) {
           status = 'error';
           messages.push(`Email "${email}" ganda dengan baris ke-${seenCsvEmails.get(normalizedEmail)} di file CSV.`);
         } else {
           seenCsvEmails.set(normalizedEmail, i);
+          if (existingEmailSet.has(normalizedEmail)) {
+            alreadyRegistered = true;
+            if (updateExistingOnImport) {
+              status = 'warning';
+              messages.push(`Email sudah terdaftar — akan diperbarui & disinkronkan ke Data Guru.`);
+            } else {
+              status = 'error';
+              messages.push(`Email "${email}" sudah terdaftar di sistem.`);
+            }
+          }
         }
 
         if (!full_name) {
@@ -455,7 +469,7 @@ export const UserManagementPage: React.FC = () => {
           messages.push(`Jenis kelamin "${rawJk}" tidak standar, otomatis diset L.`);
         }
 
-        if (status !== 'error' && (roles.includes('guru') || roles.includes('wali_kelas'))) {
+        if (status === 'valid' && (roles.includes('guru') || roles.includes('wali_kelas'))) {
           messages.push('Siap masuk Akun & Data Guru.');
         }
 
@@ -471,6 +485,7 @@ export const UserManagementPage: React.FC = () => {
           phone_number,
           specialization,
           roles,
+          alreadyRegistered,
           status,
           messages,
         });
@@ -520,7 +535,9 @@ export const UserManagementPage: React.FC = () => {
     }));
 
     try {
-      const result = await bulkCreateUsersFromCSV(payloadRows, currentUser?.id || 'admin');
+      const result = await bulkCreateUsersFromCSV(payloadRows, currentUser?.id || 'admin', {
+        updateExisting: updateExistingOnImport,
+      });
       const allErrors = [...invalidPreviewErrors, ...result.errors];
 
       setImportSummary({
@@ -633,17 +650,20 @@ export const UserManagementPage: React.FC = () => {
   };
 
   // Hapus Akun
-  const handleDeleteUser = async (userId: string, name: string) => {
+  const handleDeleteUser = async (userId: string, name: string, email?: string) => {
     if (confirm(`Apakah Anda yakin ingin menghapus akun ${name}? Data guru yang tertaut juga akan dihapus.`)) {
       try {
-        await deleteUser(userId);
+        await deleteUser(userId, email);
         setNotification({
           type: 'success',
           message: `Akun ${name} berhasil dihapus.`,
         });
         await loadData();
       } catch (err: any) {
-        alert(err.message);
+        setNotification({
+          type: 'error',
+          message: err.message,
+        });
       }
     }
   };
@@ -957,7 +977,7 @@ export const UserManagementPage: React.FC = () => {
                         </button>
                         {item.email.toLowerCase() !== 'alihsansoborejo@gmail.com' && (
                           <button
-                            onClick={() => handleDeleteUser(item.id, item.full_name)}
+                            onClick={() => handleDeleteUser(item.id, item.full_name, item.email)}
                             className="p-1 text-slate-400 hover:text-red-700 hover:bg-red-50 rounded-md border border-slate-200 transition-colors"
                             title="Hapus Akun Pengguna"
                           >
@@ -1327,7 +1347,7 @@ export const UserManagementPage: React.FC = () => {
               <input
                 type="text"
                 value={editNuptk}
-                onChange={(e) => setNewNuptk(e.target.value)}
+                onChange={(e) => setEditNuptk(e.target.value)}
                 placeholder="4532..."
                 className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-600"
               />
@@ -1454,6 +1474,54 @@ export const UserManagementPage: React.FC = () => {
               className="w-full text-xs text-slate-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-800 file:text-white hover:file:bg-emerald-900 cursor-pointer border border-slate-300 rounded-lg p-1 bg-white"
             />
           </div>
+
+          {/* Opsi Penanganan Email Sudah Terdaftar */}
+          <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs cursor-pointer hover:bg-slate-100/70 transition-colors">
+            <input
+              type="checkbox"
+              checked={updateExistingOnImport}
+              onChange={(e) => {
+                const next = e.target.checked;
+                setUpdateExistingOnImport(next);
+                setCsvRows((prev) =>
+                  prev.map((row) => {
+                    if (!row.alreadyRegistered) return row;
+                    const filteredMsgs = row.messages.filter(
+                      (m) => !m.includes('sudah terdaftar')
+                    );
+                    if (next) {
+                      const hasOtherError =
+                        !row.full_name ||
+                        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.email) ||
+                        (row.password && row.password.length < 6);
+                      return {
+                        ...row,
+                        status: hasOtherError ? 'error' : 'warning',
+                        messages: [
+                          'Email sudah terdaftar — akan diperbarui & disinkronkan ke Data Guru.',
+                          ...filteredMsgs,
+                        ],
+                      };
+                    }
+                    return {
+                      ...row,
+                      status: 'error',
+                      messages: [`Email "${row.email}" sudah terdaftar di sistem.`, ...filteredMsgs],
+                    };
+                  })
+                );
+              }}
+              className="mt-0.5 rounded text-emerald-700 focus:ring-emerald-600"
+            />
+            <div>
+              <span className="font-semibold text-slate-800 block">
+                Perbarui data akun & guru jika email sudah terdaftar
+              </span>
+              <span className="text-[11px] text-slate-500">
+                Jika dicentang, email yang sudah ada di sistem akan diperbarui datanya dan ditautkan ke Data Guru tanpa gagal duplikat.
+              </span>
+            </div>
+          </label>
 
           {importError && (
             <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start gap-2">

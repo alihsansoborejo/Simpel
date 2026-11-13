@@ -113,9 +113,16 @@ export async function fetchUsersList(filters?: {
   role?: string;
   status?: string;
 }): Promise<UserListItem[]> {
+  const localUsers = getDemoUsers();
+  const mergedByEmail = new Map<string, UserListItem>();
+
+  for (const lu of localUsers) {
+    mergedByEmail.set(lu.email.trim().toLowerCase(), lu);
+  }
+
   if (isSupabaseConfigured) {
     try {
-      let query = supabase
+      const { data, error } = await supabase
         .from('profiles')
         .select(`
           id, email, full_name, phone_number, avatar_url, is_active, created_at,
@@ -124,49 +131,36 @@ export async function fetchUsersList(filters?: {
         `)
         .order('created_at', { ascending: false });
 
-      if (filters?.search) {
-        query = query.or(`full_name.ilike.%${filters.search}%,email.ilike.%${filters.search}%`);
-      }
-
-      if (filters?.status === 'active') {
-        query = query.eq('is_active', true);
-      } else if (filters?.status === 'inactive') {
-        query = query.eq('is_active', false);
-      }
-
-      const { data, error } = await query;
-      if (!error && data && data.length > 0) {
-        const items: UserListItem[] = data.map((row: any) => {
-          const roles: UserRole[] = (row.user_roles || []).map((r: any) => r.role);
+      if (!error && Array.isArray(data)) {
+        for (const row of data as any[]) {
+          const normEmail = String(row.email || '').trim().toLowerCase();
+          if (!normEmail) continue;
+          const existingLocal = mergedByEmail.get(normEmail);
+          const remoteRoles: UserRole[] = (row.user_roles || []).map((r: any) => r.role);
           const teacher = Array.isArray(row.teachers) ? row.teachers[0] : row.teachers;
-          return {
+
+          mergedByEmail.set(normEmail, {
             id: row.id,
-            email: row.email,
-            full_name: row.full_name,
-            phone_number: row.phone_number,
-            avatar_url: row.avatar_url,
-            is_active: row.is_active,
-            created_at: row.created_at,
-            roles,
-            password: '••••••••',
-            title_prefix: teacher?.title_prefix || null,
-            title_suffix: teacher?.title_suffix || null,
-            gender: teacher?.gender || 'L',
-            nip: teacher?.nip || null,
-            nuptk: teacher?.nuptk || null,
-            specialization: teacher?.specialization || null,
-            teacher_info: teacher ? { id: teacher.id, nip: teacher.nip, specialization: teacher.specialization } : null,
-          };
-        });
-
-        if (filters?.role) {
-          return items.filter((u) => u.roles.includes(filters.role as UserRole));
+            email: normEmail,
+            full_name: row.full_name || existingLocal?.full_name || normEmail.split('@')[0],
+            phone_number: row.phone_number ?? existingLocal?.phone_number ?? null,
+            avatar_url: row.avatar_url ?? existingLocal?.avatar_url ?? null,
+            is_active: row.is_active ?? existingLocal?.is_active ?? true,
+            created_at: row.created_at || existingLocal?.created_at || new Date().toISOString(),
+            roles: remoteRoles.length > 0 ? remoteRoles : existingLocal?.roles || ['guru'],
+            password: existingLocal?.password || '••••••••',
+            title_prefix: teacher?.title_prefix ?? existingLocal?.title_prefix ?? null,
+            title_suffix: teacher?.title_suffix ?? existingLocal?.title_suffix ?? null,
+            gender: teacher?.gender ?? existingLocal?.gender ?? 'L',
+            nip: teacher?.nip ?? existingLocal?.nip ?? null,
+            nuptk: teacher?.nuptk ?? existingLocal?.nuptk ?? null,
+            specialization: teacher?.specialization ?? existingLocal?.specialization ?? null,
+            teacher_info: teacher
+              ? { id: teacher.id, nip: teacher.nip, specialization: teacher.specialization }
+              : existingLocal?.teacher_info ?? null,
+          });
         }
-
-        return items;
-      }
-
-      if (error) {
+      } else if (error) {
         console.warn('Supabase fetchUsersList fallback to local store:', error.message);
       }
     } catch (err) {
@@ -174,13 +168,16 @@ export async function fetchUsersList(filters?: {
     }
   }
 
-  // Fallback demo filtering
-  let result = getDemoUsers();
+  let result = Array.from(mergedByEmail.values());
 
   if (filters?.search) {
     const q = filters.search.toLowerCase();
     result = result.filter(
-      (u) => u.full_name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+      (u) =>
+        u.full_name.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q) ||
+        (u.nip && u.nip.toLowerCase().includes(q)) ||
+        (u.specialization && u.specialization.toLowerCase().includes(q))
     );
   }
 
@@ -244,9 +241,12 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
   const newUserId = `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
   const password = data.password?.trim() || 'AlIhsan2026!';
 
+  const cleanNip = data.nip?.trim() || undefined;
+  const cleanNuptk = data.nuptk?.trim() || undefined;
+
   // Periksa apakah peran mencakup aspek keguruan / akademik
   const isTeacherRole = data.roles.some((r) => ['guru', 'wali_kelas', 'kepala_madrasah'].includes(r));
-  const shouldCreateTeacher = data.auto_create_teacher !== false && (isTeacherRole || !!data.specialization || !!data.nip);
+  const shouldCreateTeacher = data.auto_create_teacher !== false && (isTeacherRole || !!data.specialization || !!cleanNip);
 
   let linkedTeacher: Teacher | null = null;
 
@@ -256,7 +256,9 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
       const existingTeachers = await academicService.getTeachers();
       // Cek apakah data guru dengan NIP atau Nama yang sama sudah ada di tabel guru
       const matchedTeacher = existingTeachers.find(
-        (t) => (data.nip && t.nip === data.nip) || t.full_name.toLowerCase() === data.full_name.toLowerCase().trim()
+        (t) =>
+          (cleanNip && t.nip === cleanNip) ||
+          t.full_name.toLowerCase() === data.full_name.toLowerCase().trim()
       );
 
       if (matchedTeacher) {
@@ -265,8 +267,8 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
           user_id: newUserId,
           title_prefix: data.title_prefix !== undefined ? data.title_prefix : matchedTeacher.title_prefix,
           title_suffix: data.title_suffix !== undefined ? data.title_suffix : matchedTeacher.title_suffix,
-          nip: data.nip || matchedTeacher.nip,
-          nuptk: data.nuptk || matchedTeacher.nuptk,
+          nip: cleanNip || matchedTeacher.nip,
+          nuptk: cleanNuptk || matchedTeacher.nuptk,
           gender: data.gender || matchedTeacher.gender,
           phone_number: data.phone_number || matchedTeacher.phone_number,
           specialization: data.specialization || matchedTeacher.specialization,
@@ -279,8 +281,8 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
           full_name: data.full_name.trim(),
           title_prefix: data.title_prefix || null,
           title_suffix: data.title_suffix || null,
-          nip: data.nip || null,
-          nuptk: data.nuptk || null,
+          nip: cleanNip || null,
+          nuptk: cleanNuptk || null,
           gender: data.gender || 'L',
           phone_number: data.phone_number || null,
           specialization: data.specialization || (data.roles.includes('kepala_madrasah') ? 'Kepala Madrasah' : 'Guru Pengampu'),
@@ -369,12 +371,14 @@ export async function createUserWithRoles(data: CreateUserData, adminId: string 
  */
 export async function bulkCreateUsersFromCSV(
   rows: Array<CreateUserData>,
-  adminId: string
+  adminId: string,
+  options?: { updateExisting?: boolean }
 ): Promise<BulkImportResult> {
   let success = 0;
   let failed = 0;
   const errors: string[] = [];
   const createdUsers: UserListItem[] = [];
+  const updateExisting = options?.updateExisting ?? false;
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -382,9 +386,33 @@ export async function bulkCreateUsersFromCSV(
       if (!row.email || !row.full_name) {
         throw new Error(`Baris ${i + 1}: Email dan Nama Lengkap wajib diisi.`);
       }
-      const created = await createUserWithRoles(row, adminId);
-      createdUsers.push(created);
-      success++;
+
+      const normalizedEmail = row.email.trim().toLowerCase();
+      const currentUsers = getDemoUsers();
+      const existing = currentUsers.find((u) => u.email.trim().toLowerCase() === normalizedEmail);
+
+      if (existing && updateExisting) {
+        const updated = await updateUserAndTeacher(existing.id, {
+          full_name: row.full_name.trim(),
+          email: normalizedEmail,
+          phone_number: row.phone_number || existing.phone_number || null,
+          password: row.password?.trim() || existing.password || 'AlIhsan2026!',
+          roles: row.roles,
+          is_active: row.is_active ?? existing.is_active,
+          title_prefix: row.title_prefix ?? existing.title_prefix ?? null,
+          title_suffix: row.title_suffix ?? existing.title_suffix ?? null,
+          nip: row.nip?.trim() || existing.nip || null,
+          nuptk: row.nuptk?.trim() || existing.nuptk || null,
+          gender: row.gender || existing.gender || 'L',
+          specialization: row.specialization || existing.specialization || null,
+        });
+        createdUsers.push(updated);
+        success++;
+      } else {
+        const created = await createUserWithRoles(row, adminId);
+        createdUsers.push(created);
+        success++;
+      }
     } catch (err: any) {
       failed++;
       errors.push(`Baris ${i + 1} (${row.email || row.full_name || 'Tanpa Nama'}): ${err.message}`);
@@ -421,16 +449,16 @@ export async function updateUserAndTeacher(
   }
 ): Promise<UserListItem> {
   const currentUsers = getDemoUsers();
-  const existing = currentUsers.find((u) => u.id === userId);
-  if (!existing) {
-    throw new Error('Data akun pengguna tidak ditemukan.');
-  }
+  const normalizedTargetEmail = payload.email.toLowerCase().trim();
+  const existing =
+    currentUsers.find((u) => u.id === userId) ||
+    currentUsers.find((u) => u.email.toLowerCase() === normalizedTargetEmail);
 
   // Sinkronkan ke Data Guru jika terhubung atau memiliki peran pendidik
-  let linkedTeacherInfo = existing.teacher_info;
+  let linkedTeacherInfo = existing?.teacher_info || null;
   const isTeacherRole = payload.roles.some((r) => ['guru', 'wali_kelas', 'kepala_madrasah'].includes(r));
 
-  if (existing.teacher_info?.id) {
+  if (existing?.teacher_info?.id) {
     try {
       const updatedTeacher = await academicService.updateTeacher(existing.teacher_info.id, {
         full_name: payload.full_name,
@@ -452,36 +480,64 @@ export async function updateUserAndTeacher(
       console.warn('Gagal sinkronisasi data guru saat update akun:', err);
     }
   } else if (isTeacherRole) {
-    // Belum punya profil guru, otomatis buatkan
+    // Belum punya profil guru, cari berdasarkan NIP/Nama atau otomatis buatkan
     try {
-      const newTeacher = await academicService.createTeacher({
-        user_id: userId,
-        full_name: payload.full_name,
-        title_prefix: payload.title_prefix || null,
-        title_suffix: payload.title_suffix || null,
-        nip: payload.nip || null,
-        nuptk: payload.nuptk || null,
-        gender: payload.gender || 'L',
-        phone_number: payload.phone_number || null,
-        specialization: payload.specialization || 'Guru Pengampu',
-        is_active: payload.is_active,
-      });
-      linkedTeacherInfo = {
-        id: newTeacher.id,
-        nip: newTeacher.nip,
-        specialization: newTeacher.specialization,
-      };
+      const existingTeachers = await academicService.getTeachers();
+      const matchedTeacher = existingTeachers.find(
+        (t) =>
+          (payload.nip && t.nip === payload.nip.trim()) ||
+          t.full_name.toLowerCase() === payload.full_name.toLowerCase().trim()
+      );
+      if (matchedTeacher) {
+        const updatedTeacher = await academicService.updateTeacher(matchedTeacher.id, {
+          user_id: existing?.id || userId,
+          full_name: payload.full_name,
+          title_prefix: payload.title_prefix || matchedTeacher.title_prefix,
+          title_suffix: payload.title_suffix || matchedTeacher.title_suffix,
+          nip: payload.nip || matchedTeacher.nip,
+          nuptk: payload.nuptk || matchedTeacher.nuptk,
+          gender: payload.gender || matchedTeacher.gender,
+          phone_number: payload.phone_number || matchedTeacher.phone_number,
+          specialization: payload.specialization || matchedTeacher.specialization,
+          is_active: payload.is_active,
+        });
+        linkedTeacherInfo = {
+          id: updatedTeacher.id,
+          nip: updatedTeacher.nip,
+          specialization: updatedTeacher.specialization,
+        };
+      } else {
+        const newTeacher = await academicService.createTeacher({
+          user_id: existing?.id || userId,
+          full_name: payload.full_name,
+          title_prefix: payload.title_prefix || null,
+          title_suffix: payload.title_suffix || null,
+          nip: payload.nip || null,
+          nuptk: payload.nuptk || null,
+          gender: payload.gender || 'L',
+          phone_number: payload.phone_number || null,
+          specialization: payload.specialization || 'Guru Pengampu',
+          is_active: payload.is_active,
+        });
+        linkedTeacherInfo = {
+          id: newTeacher.id,
+          nip: newTeacher.nip,
+          specialization: newTeacher.specialization,
+        };
+      }
     } catch (err) {
       console.warn('Gagal otomatisasi profil guru baru saat update:', err);
     }
   }
 
   const updatedUser: UserListItem = {
-    ...existing,
+    id: existing?.id || userId,
+    avatar_url: existing?.avatar_url || null,
+    created_at: existing?.created_at || new Date().toISOString(),
     full_name: payload.full_name,
-    email: payload.email.toLowerCase().trim(),
+    email: normalizedTargetEmail,
     phone_number: payload.phone_number || null,
-    password: payload.password || existing.password || 'AlIhsan2026!',
+    password: payload.password || existing?.password || 'AlIhsan2026!',
     roles: payload.roles,
     is_active: payload.is_active,
     title_prefix: payload.title_prefix || null,
@@ -493,7 +549,9 @@ export async function updateUserAndTeacher(
     teacher_info: linkedTeacherInfo,
   };
 
-  const updatedList = currentUsers.map((u) => (u.id === userId ? updatedUser : u));
+  const updatedList = existing
+    ? currentUsers.map((u) => (u.id === existing.id ? updatedUser : u))
+    : [updatedUser, ...currentUsers];
   saveDemoUsers(updatedList);
 
   return updatedUser;
@@ -531,17 +589,22 @@ export async function updateUserRolesAndStatus(
 /**
  * Menghapus akun pengguna dan memutuskan tautan guru
  */
-export async function deleteUser(userId: string): Promise<void> {
+export async function deleteUser(userId: string, emailHint?: string): Promise<void> {
   const currentUsers = getDemoUsers();
-  const user = currentUsers.find((u) => u.id === userId);
-  if (!user) return;
+  const normalizedHint = emailHint?.trim().toLowerCase();
+  const user =
+    currentUsers.find((u) => u.id === userId) ||
+    (normalizedHint ? currentUsers.find((u) => u.email.trim().toLowerCase() === normalizedHint) : undefined);
 
-  if (user.email.toLowerCase() === 'alihsansoborejo@gmail.com') {
+  if (user && user.email.toLowerCase() === 'alihsansoborejo@gmail.com') {
+    throw new Error('Akun Administrator utama madrasah tidak dapat dihapus.');
+  }
+  if (normalizedHint === 'alihsansoborejo@gmail.com') {
     throw new Error('Akun Administrator utama madrasah tidak dapat dihapus.');
   }
 
   // Jika memiliki profil guru yang dibuatkan, hapus data gurunya
-  if (user.teacher_info?.id) {
+  if (user?.teacher_info?.id) {
     try {
       await academicService.deleteTeacher(user.teacher_info.id);
     } catch (err) {
@@ -549,7 +612,9 @@ export async function deleteUser(userId: string): Promise<void> {
     }
   }
 
-  const remaining = currentUsers.filter((u) => u.id !== userId);
+  const remaining = currentUsers.filter(
+    (u) => u.id !== userId && (!normalizedHint || u.email.trim().toLowerCase() !== normalizedHint)
+  );
   saveDemoUsers(remaining);
 
   await activityLogService.log({
@@ -557,7 +622,7 @@ export async function deleteUser(userId: string): Promise<void> {
     userRole: 'admin',
     action: 'DELETE_USER',
     module: 'Manajemen Akun & Guru',
-    details: `Menghapus akun ${user.full_name} (${user.email}) beserta tautan guru`,
+    details: `Menghapus akun ${user?.full_name || normalizedHint || userId} (${user?.email || normalizedHint || '-'}) beserta tautan guru`,
   });
 }
 

@@ -372,37 +372,81 @@ export const academicService = {
 
   // === DATA GURU ===
   async getTeachers(): Promise<Teacher[]> {
+    const localTeachers = getLocal<Teacher[]>(STORAGE_KEYS.TEACHERS, DEMO_TEACHERS);
     if (isSupabaseConfigured) {
       try {
         const { data, error } = await supabase.from('teachers').select('*').order('full_name', { ascending: true });
-        if (!error && data && data.length > 0) return data as Teacher[];
+        if (!error && Array.isArray(data)) {
+          const remoteTeachers = data as Teacher[];
+          const merged: Teacher[] = [...remoteTeachers];
+          const seenIds = new Set(remoteTeachers.map((t) => t.id));
+          const seenNames = new Set(remoteTeachers.map((t) => t.full_name.trim().toLowerCase()));
+          const seenNips = new Set(remoteTeachers.map((t) => t.nip?.trim()).filter(Boolean) as string[]);
+
+          for (const lt of localTeachers) {
+            const normName = lt.full_name.trim().toLowerCase();
+            const normNip = lt.nip?.trim() || '';
+            if (seenIds.has(lt.id) || (normNip && seenNips.has(normNip)) || seenNames.has(normName)) {
+              continue;
+            }
+            merged.push(lt);
+            seenIds.add(lt.id);
+            seenNames.add(normName);
+            if (normNip) seenNips.add(normNip);
+          }
+
+          return merged.sort((a, b) => a.full_name.localeCompare(b.full_name, 'id'));
+        }
       } catch (err) {
         console.warn('Supabase getTeachers fallback:', err);
       }
     }
-    return getLocal<Teacher[]>(STORAGE_KEYS.TEACHERS, DEMO_TEACHERS);
+    return localTeachers;
   },
 
   async createTeacher(payload: Omit<Teacher, 'id' | 'created_at' | 'updated_at'>): Promise<Teacher> {
     const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tch-${Date.now()}`;
-    const newTeacher: Teacher = {
+    const now = new Date().toISOString();
+    const cleanNip = payload.nip?.trim() || null;
+    const cleanNuptk = payload.nuptk?.trim() || null;
+
+    let savedTeacher: Teacher = {
       ...payload,
+      nip: cleanNip,
+      nuptk: cleanNuptk,
       id,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: now,
+      updated_at: now,
     };
+
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('teachers').insert(newTeacher).select().single();
-        if (data) return data as Teacher;
+        const supabasePayload = {
+          ...savedTeacher,
+          user_id: isUuid(payload.user_id) ? payload.user_id : null,
+        };
+        let { data, error } = await supabase.from('teachers').insert(supabasePayload).select().single();
+        if (error && supabasePayload.user_id !== null) {
+          const retry = await supabase
+            .from('teachers')
+            .insert({ ...supabasePayload, user_id: null })
+            .select()
+            .single();
+          data = retry.data;
+          error = retry.error;
+        }
+        if (!error && data) {
+          savedTeacher = data as Teacher;
+        }
       } catch (err) {
         console.warn('Supabase createTeacher fallback:', err);
       }
     }
-    const teachers = await this.getTeachers();
-    const updated = [newTeacher, ...teachers];
+
+    const localTeachers = getLocal<Teacher[]>(STORAGE_KEYS.TEACHERS, DEMO_TEACHERS);
+    const updated = [savedTeacher, ...localTeachers.filter((t) => t.id !== savedTeacher.id)];
     setLocal(STORAGE_KEYS.TEACHERS, updated);
-    return newTeacher;
+    return savedTeacher;
   },
 
   async updateTeacher(id: string, payload: Partial<Teacher>): Promise<Teacher> {
@@ -410,35 +454,49 @@ export const academicService = {
     const teacher = teachers.find((t) => t.id === id);
     if (!teacher) throw new Error('Data tenaga pendidik tidak ditemukan');
 
+    const cleanPayload: Partial<Teacher> = {
+      ...payload,
+      ...(payload.nip !== undefined ? { nip: payload.nip?.trim() || null } : {}),
+      ...(payload.nuptk !== undefined ? { nuptk: payload.nuptk?.trim() || null } : {}),
+    };
+
     const updatedTeacher: Teacher = {
       ...teacher,
-      ...payload,
+      ...cleanPayload,
       updated_at: new Date().toISOString(),
     };
 
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id)) {
       try {
-        await supabase.from('teachers').update(payload).eq('id', id);
+        const supabaseUpdate: Partial<Teacher> = { ...cleanPayload };
+        if ('user_id' in supabaseUpdate && !isUuid(supabaseUpdate.user_id)) {
+          delete supabaseUpdate.user_id;
+        }
+        await supabase.from('teachers').update(supabaseUpdate).eq('id', id);
       } catch (err) {
         console.warn('Supabase updateTeacher fallback:', err);
       }
     }
 
-    const updated = teachers.map((t) => (t.id === id ? updatedTeacher : t));
+    const localTeachers = getLocal<Teacher[]>(STORAGE_KEYS.TEACHERS, DEMO_TEACHERS);
+    const existsInLocal = localTeachers.some((t) => t.id === id);
+    const updated = existsInLocal
+      ? localTeachers.map((t) => (t.id === id ? updatedTeacher : t))
+      : [updatedTeacher, ...localTeachers];
     setLocal(STORAGE_KEYS.TEACHERS, updated);
     return updatedTeacher;
   },
 
   async deleteTeacher(id: string): Promise<void> {
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isUuid(id)) {
       try {
         await supabase.from('teachers').delete().eq('id', id);
       } catch (err) {
         console.warn('Supabase deleteTeacher fallback:', err);
       }
     }
-    const teachers = await this.getTeachers();
-    const updated = teachers.filter((t) => t.id !== id);
+    const localTeachers = getLocal<Teacher[]>(STORAGE_KEYS.TEACHERS, DEMO_TEACHERS);
+    const updated = localTeachers.filter((t) => t.id !== id);
     setLocal(STORAGE_KEYS.TEACHERS, updated);
   },
 
