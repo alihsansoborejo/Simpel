@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { SystemSettings } from '../types/database.types';
 import { academicService } from '../services/academicService';
 import { DEMO_SYSTEM_SETTINGS } from '../lib/demoData';
+import { useRealtimeSync } from '../hooks/useRealtimeSync';
 
 interface AppSettingsContextType {
   settings: SystemSettings | null;
@@ -61,6 +62,10 @@ export const AppSettingsProvider: React.FC<{ children: React.ReactNode }> = ({ c
   useEffect(() => {
     loadSettings();
   }, []);
+
+  useRealtimeSync(['simpel_settings'], () => {
+    void loadSettings();
+  });
 
   const updateSettings = async (partial: Partial<SystemSettings>): Promise<SystemSettings> => {
     const current = settings || DEMO_SYSTEM_SETTINGS;

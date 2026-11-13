@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
 import { Subject } from '../../types/database.types';
 import { BookOpen, Plus, Search, CheckCircle, Tag } from 'lucide-react';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 
 export const SubjectsPage: React.FC = () => {
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -32,6 +33,10 @@ export const SubjectsPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_subjects'], () => {
+    void loadData();
+  });
 
   const handleCreateSubject = async (e: React.FormEvent) => {
     e.preventDefault();

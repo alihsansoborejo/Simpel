@@ -3,6 +3,7 @@ import { fetchAdminDashboardData, AdminDashboardData } from '../../services/dash
 import { fetchRecentActivityLogs } from '../../services/userService';
 import { ActivityLog } from '../../types/database.types';
 import { StatCard } from '../../components/ui/StatCard';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   Users,
   GraduationCap,
@@ -26,23 +27,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const [dashData, logData] = await Promise.all([
-          fetchAdminDashboardData(),
-          fetchRecentActivityLogs(6),
-        ]);
-        setData(dashData);
-        setLogs(logData);
-      } catch (err) {
-        console.error('Error loading admin dashboard:', err);
-      } finally {
-        setIsLoading(false);
-      }
+  const loadData = async () => {
+    try {
+      const [dashData, logData] = await Promise.all([
+        fetchAdminDashboardData(),
+        fetchRecentActivityLogs(6),
+      ]);
+      setData(dashData);
+      setLogs(logData);
+    } catch (err) {
+      console.error('Error loading admin dashboard:', err);
+    } finally {
+      setIsLoading(false);
     }
-    loadData();
+  };
+
+  useEffect(() => {
+    void loadData();
   }, []);
+
+  useRealtimeSync('*', () => {
+    void loadData();
+  });
 
   if (isLoading || !data) {
     return (

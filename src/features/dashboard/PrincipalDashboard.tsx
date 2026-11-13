@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { fetchPrincipalDashboardData, PrincipalDashboardData } from '../../services/dashboardService';
 import { StatCard } from '../../components/ui/StatCard';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   FolderSync,
   ClipboardList,
@@ -21,19 +22,24 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ onNaviga
   const [data, setData] = useState<PrincipalDashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const res = await fetchPrincipalDashboardData();
-        setData(res);
-      } catch (err) {
-        console.error('Error loading principal dashboard:', err);
-      } finally {
-        setIsLoading(false);
-      }
+  const loadData = async () => {
+    try {
+      const res = await fetchPrincipalDashboardData();
+      setData(res);
+    } catch (err) {
+      console.error('Error loading principal dashboard:', err);
+    } finally {
+      setIsLoading(false);
     }
-    loadData();
+  };
+
+  useEffect(() => {
+    void loadData();
   }, []);
+
+  useRealtimeSync('*', () => {
+    void loadData();
+  });
 
   if (isLoading || !data) {
     return (

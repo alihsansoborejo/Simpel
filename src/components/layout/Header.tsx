@@ -4,6 +4,7 @@ import { useGoogleDrive } from '../../context/GoogleDriveContext';
 import { ROLE_CONFIGS } from '../../types/auth.types';
 import { UserRole } from '../../types/database.types';
 import { isSupabaseConfigured } from '../../lib/supabaseClient';
+import { useSync } from '../../context/SyncContext';
 import {
   Menu,
   Bell,
@@ -15,6 +16,7 @@ import {
   ArrowRightLeft,
   HelpCircle,
   HardDrive,
+  RefreshCw,
 } from 'lucide-react';
 import { NotificationDrawer } from '../notification/NotificationDrawer';
 import { HelpGuideModal } from '../common/HelpGuideModal';
@@ -28,6 +30,8 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, activeView }) => {
   const { user, activeRole, availableRoles, switchActiveRole, logout } = useAuth();
   const { isConnected: isDriveConnected, googleUser } = useGoogleDrive();
+  const { status: syncStatus, activeDevices, syncNow } = useSync();
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isRoleMenuOpen, setIsRoleMenuOpen] = useState(false);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
@@ -79,11 +83,50 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, a
 
       {/* Right: Role Switcher, Database Status, Notifications, & Profile */}
       <div className="flex items-center gap-2 md:gap-3">
-        {/* Supabase Status Indicator */}
-        <div className="hidden lg:flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-medium text-slate-600 bg-slate-100 border border-slate-200">
-          <Database className={`w-3.5 h-3.5 ${isSupabaseConfigured ? 'text-emerald-600' : 'text-amber-600'}`} />
-          <span>{isSupabaseConfigured ? 'Supabase Live' : 'Demo Mode (Lokal)'}</span>
-        </div>
+        {/* Real-Time Cross-Device Sync Status Button */}
+        <button
+          onClick={async () => {
+            setIsManualSyncing(true);
+            try {
+              await syncNow();
+            } finally {
+              setTimeout(() => setIsManualSyncing(false), 400);
+            }
+          }}
+          className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer ${
+            syncStatus === 'connected' || isSupabaseConfigured
+              ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+              : syncStatus === 'offline'
+              ? 'bg-rose-50 text-rose-700 border-rose-200'
+              : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+          }`}
+          title="Klik untuk memaksa sinkronisasi data antarperangkat sekarang"
+        >
+          {isManualSyncing || syncStatus === 'syncing' ? (
+            <RefreshCw className="w-3.5 h-3.5 text-emerald-600 animate-spin" />
+          ) : (
+            <Database
+              className={`w-3.5 h-3.5 ${
+                syncStatus === 'connected' || isSupabaseConfigured
+                  ? 'text-emerald-600'
+                  : syncStatus === 'offline'
+                  ? 'text-rose-500'
+                  : 'text-amber-600'
+              }`}
+            />
+          )}
+          <span>
+            {isManualSyncing || syncStatus === 'syncing'
+              ? 'Menyinkronkan...'
+              : isSupabaseConfigured
+              ? 'Supabase Live + Sync'
+              : syncStatus === 'connected'
+              ? `Sinkron Real-Time${activeDevices > 1 ? ` (${activeDevices})` : ''}`
+              : syncStatus === 'offline'
+              ? 'Mode Offline'
+              : 'Menyambungkan...'}
+          </span>
+        </button>
 
         {/* Google Drive Status Button */}
         <button

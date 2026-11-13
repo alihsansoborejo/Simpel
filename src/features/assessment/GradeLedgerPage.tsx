@@ -4,6 +4,7 @@ import { reportService, StudentSubjectScore, ClassLegerRow } from '../../service
 import { ClassRoom, Subject, Student, Teacher } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   FileSpreadsheet,
   Award,
@@ -101,6 +102,15 @@ export const GradeLedgerPage: React.FC<GradeLedgerPageProps> = ({ onNavigate }) 
       loadLedgerData();
     }
   }, [selectedClassId, selectedSubjectId, viewMode]);
+
+  useRealtimeSync(
+    ['simpel_subject_ledger_v1', 'simpel_report_card_locks_v1', 'simpel_students', 'simpel_classes', 'simpel_subjects', 'simpel_class_members'],
+    () => {
+      if (selectedClassId && selectedSubjectId) {
+        void loadLedgerData();
+      }
+    }
+  );
 
   // Handle Score Change
   const handleScoreChange = (

@@ -9,6 +9,9 @@ import {
   fetchFullUserAccount,
 } from '../services/authService';
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
+import { getDemoUsers } from '../services/userService';
+import { academicService } from '../services/academicService';
+import { useRealtimeSync } from '../hooks/useRealtimeSync';
 
 interface AuthContextType {
   user: AuthUser | null;
@@ -163,11 +166,56 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (isSupabaseConfigured) {
         const refreshed = await fetchFullUserAccount(user.id, user.email);
         setUser(refreshed);
+        return;
       }
+
+      const latestUsers = getDemoUsers();
+      const matched = latestUsers.find(
+        (u) => u.id === user.id || u.email.toLowerCase() === user.email.toLowerCase()
+      );
+      if (!matched) return;
+
+      const teacherId = matched.teacher_info?.id || user.teacherId || null;
+      let homeroomClassId: string | null = null;
+      if (teacherId) {
+        try {
+          const classes = await academicService.getClasses();
+          const cls = classes.find((c) => c.homeroom_teacher_id === teacherId);
+          if (cls) homeroomClassId = cls.id;
+        } catch {
+          // ignore
+        }
+      }
+
+      const nextRoles = matched.roles.length > 0 ? matched.roles : user.roles;
+      const nextActiveRole = nextRoles.includes(activeRole) ? activeRole : nextRoles[0];
+
+      const updated: AuthUser = {
+        ...user,
+        profile: {
+          ...user.profile,
+          full_name: matched.full_name,
+          phone_number: matched.phone_number,
+          avatar_url: matched.avatar_url,
+          is_active: matched.is_active,
+        },
+        roles: nextRoles,
+        activeRole: nextActiveRole,
+        teacherId,
+        homeroomClassId,
+      };
+
+      setActiveRole(nextActiveRole);
+      setUser(updated);
+      localStorage.setItem('simpel_mi_session_user', JSON.stringify(updated));
     } catch (err: any) {
       console.warn('Gagal memuat ulang profil:', err?.message);
     }
   };
+
+  useRealtimeSync(['simpel_users_cache_v2', 'simpel_teachers', 'simpel_classes'], () => {
+    void refreshProfile();
+  });
 
   const availableRoles = useMemo(() => user?.roles || [], [user]);
 

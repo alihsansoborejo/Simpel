@@ -12,6 +12,7 @@ import { useAuth } from '../../context/AuthContext';
 import { ROLE_CONFIGS } from '../../types/auth.types';
 import { UserRole } from '../../types/database.types';
 import { Modal } from '../../components/ui/Modal';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   Users,
   Search,
@@ -123,6 +124,10 @@ export const UserManagementPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, [searchTerm, roleFilter, statusFilter]);
+
+  useRealtimeSync(['simpel_users_cache_v2', 'simpel_teachers'], () => {
+    void loadData();
+  });
 
   const handleRoleToggle = (role: UserRole, target: 'new' | 'edit') => {
     if (target === 'new') {

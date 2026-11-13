@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { academicService } from '../../services/academicService';
 import { TeachingAssignment, Teacher, ClassRoom, Subject } from '../../types/database.types';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   ClipboardList,
   Search,
@@ -94,6 +95,10 @@ export const TeachingAssignmentsPage: React.FC<Props> = ({ initialView, onNaviga
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_assignments', 'simpel_teachers', 'simpel_classes', 'simpel_subjects'], () => {
+    void loadData();
+  });
 
   const showToast = (text: string, type: 'success' | 'info' | 'error' = 'success') => {
     setToastMessage({ text, type });

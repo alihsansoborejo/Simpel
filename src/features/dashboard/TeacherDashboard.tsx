@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { fetchTeacherDashboardData, TeacherDashboardData } from '../../services/dashboardService';
 import { StatCard } from '../../components/ui/StatCard';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   CalendarCheck,
   ClipboardList,
@@ -43,19 +44,24 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onNavigate }
     content: React.ReactNode;
   } | null>(null);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const res = await fetchTeacherDashboardData(user?.teacherId);
-        setData(res);
-      } catch (err) {
-        console.error('Error loading teacher dashboard:', err);
-      } finally {
-        setIsLoading(false);
-      }
+  const loadData = async () => {
+    try {
+      const res = await fetchTeacherDashboardData(user?.teacherId);
+      setData(res);
+    } catch (err) {
+      console.error('Error loading teacher dashboard:', err);
+    } finally {
+      setIsLoading(false);
     }
-    loadData();
+  };
+
+  useEffect(() => {
+    void loadData();
   }, [user]);
+
+  useRealtimeSync('*', () => {
+    void loadData();
+  });
 
   if (isLoading || !data) {
     return (

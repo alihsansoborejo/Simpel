@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   CapaianPembelajaranItem,
   TujuanPembelajaranItem,
@@ -87,6 +88,19 @@ export const CurriculumManagementPage: React.FC<CurriculumManagementPageProps> =
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(
+    [
+      'simpel_mi_cp_items_v1',
+      'simpel_mi_tp_items_v1',
+      'simpel_mi_atp_items_v1',
+      'simpel_mi_modul_items_v1',
+      'simpel_mi_lkpd_items_v1',
+    ],
+    () => {
+      loadData();
+    }
+  );
 
   const notify = (msg: string) => {
     setNotification(msg);

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { fetchHomeroomDashboardData, HomeroomDashboardData } from '../../services/dashboardService';
 import { StatCard } from '../../components/ui/StatCard';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   Users,
   CalendarCheck,
@@ -21,19 +22,24 @@ export const HomeroomDashboard: React.FC<HomeroomDashboardProps> = ({ onNavigate
   const [data, setData] = useState<HomeroomDashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const res = await fetchHomeroomDashboardData();
-        setData(res);
-      } catch (err) {
-        console.error('Error loading homeroom dashboard:', err);
-      } finally {
-        setIsLoading(false);
-      }
+  const loadData = async () => {
+    try {
+      const res = await fetchHomeroomDashboardData();
+      setData(res);
+    } catch (err) {
+      console.error('Error loading homeroom dashboard:', err);
+    } finally {
+      setIsLoading(false);
     }
-    loadData();
+  };
+
+  useEffect(() => {
+    void loadData();
   }, []);
+
+  useRealtimeSync('*', () => {
+    void loadData();
+  });
 
   if (isLoading || !data) {
     return (

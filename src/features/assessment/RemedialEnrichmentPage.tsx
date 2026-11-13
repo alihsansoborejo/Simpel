@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { assessmentService } from '../../services/assessmentService';
 import { academicService } from '../../services/academicService';
 import { RemedialRecord, EnrichmentRecord, Student, TeachingAssignment } from '../../types/database.types';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   FileSpreadsheet,
   Plus,
@@ -68,6 +69,10 @@ export const RemedialEnrichmentPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_remedial', 'simpel_enrichment', 'simpel_students', 'simpel_assignments'], () => {
+    void loadData();
+  });
 
   const handleCreateRemedial = async (e: React.FormEvent) => {
     e.preventDefault();

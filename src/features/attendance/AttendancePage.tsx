@@ -4,6 +4,7 @@ import { academicService } from '../../services/academicService';
 import { Student, ClassRoom, AttendanceStatus, ClassMember, Teacher } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   CalendarCheck,
   CheckCircle,
@@ -127,6 +128,13 @@ export const AttendancePage: React.FC<AttendancePageProps> = ({ onNavigate }) =>
       loadAttendanceForClass(selectedClassId, selectedDate, allStudents, classMembers);
     }
   }, [selectedClassId, selectedDate]);
+
+  useRealtimeSync(
+    ['simpel_student_attendance', 'simpel_attendances', 'simpel_students', 'simpel_classes', 'simpel_class_members', 'simpel_homeroom_assignments'],
+    () => {
+      void loadInitialData();
+    }
+  );
 
   // Filter siswa yang terdaftar di rombel aktif
   const targetMemberIds = classMembers

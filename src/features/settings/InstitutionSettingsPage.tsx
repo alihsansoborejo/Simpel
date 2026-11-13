@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAppSettings } from '../../context/AppSettingsContext';
 import {
   School,
@@ -39,6 +39,19 @@ export const InstitutionSettingsPage: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!settings) return;
+    setSchoolName(settings.school_name || "MI Ma'arif Al Ihsan Soborejo");
+    setAddress(settings.address || 'Soborejo, Pringsurat, Temanggung, Jawa Tengah');
+    setPrincipalName(settings.principal_name || 'MUIN, S.Pd.I');
+    setPrincipalNip(settings.principal_nip || '197508152005011004');
+    setNsm(settings.nsm || '111233230045');
+    setNpsn(settings.npsn || '60712345');
+    setKktpDefault(settings.kktp_default || 75);
+    if (settings.logo_url) setCustomLogo(settings.logo_url);
+    if (settings.favicon_url) setCustomFavicon(settings.favicon_url);
+  }, [settings]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'logo' | 'favicon') => {
     const file = e.target.files?.[0];

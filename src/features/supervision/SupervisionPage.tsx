@@ -10,6 +10,7 @@ import {
 } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   Award,
   Plus,
@@ -86,6 +87,13 @@ export const SupervisionPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(
+    ['simpel_supervision_records', 'simpel_supervision_instruments', 'simpel_teachers', 'simpel_classes', 'simpel_subjects'],
+    () => {
+      void loadData();
+    }
+  );
 
   const calculatePredicate = (score: number): string => {
     if (score >= 91) return 'Amat Baik';

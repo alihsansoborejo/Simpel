@@ -7,6 +7,7 @@ import {
   DriveIntegrationConfig,
 } from '../../services/fileStorageService';
 import { useGoogleDrive } from '../../context/GoogleDriveContext';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   HardDrive,
   UploadCloud,
@@ -80,6 +81,15 @@ export const GoogleDriveStoragePage: React.FC = () => {
   useEffect(() => {
     loadStoredFiles();
   }, []);
+
+  useRealtimeSync(
+    ['simpel_drive_storage_config_v1', 'simpel_curriculum_documents'],
+    () => {
+      setDriveConfig(fileStorageService.getConfig());
+      void loadStoredFiles();
+    },
+    true
+  );
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {

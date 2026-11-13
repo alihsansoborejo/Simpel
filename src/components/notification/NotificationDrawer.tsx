@@ -16,6 +16,7 @@ import {
 import { AppNotification, NotificationCategory } from '../../types/database.types';
 import { notificationService } from '../../services/notificationService';
 import { useAuth } from '../../context/AuthContext';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 
 interface Props {
   isOpen: boolean;
@@ -54,6 +55,10 @@ export const NotificationDrawer: React.FC<Props> = ({
       loadNotifications();
     }
   }, [isOpen, activeRole]);
+
+  useRealtimeSync(['simpel_app_notifications_v1'], () => {
+    void loadNotifications();
+  });
 
   const handleMarkAsRead = async (id: string, actionUrl?: string) => {
     await notificationService.markAsRead(id);

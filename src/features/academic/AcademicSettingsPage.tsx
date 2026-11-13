@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
 import { AcademicYear, Semester, SystemSettings } from '../../types/database.types';
 import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School, Copy, Download, ExternalLink, Terminal, CheckCircle2 } from 'lucide-react';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 
 export const AcademicSettingsPage: React.FC = () => {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
@@ -53,6 +54,10 @@ export const AcademicSettingsPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_settings', 'simpel_academic_years', 'simpel_semesters'], () => {
+    void loadData();
+  });
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();

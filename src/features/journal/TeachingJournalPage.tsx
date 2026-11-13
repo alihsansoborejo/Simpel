@@ -4,6 +4,7 @@ import { academicService } from '../../services/academicService';
 import { TeachingJournal, TeachingAssignment } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   ClipboardList,
   Plus,
@@ -68,6 +69,10 @@ export const TeachingJournalPage: React.FC<TeachingJournalPageProps> = ({ onNavi
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_teaching_journals', 'simpel_assignments'], () => {
+    void loadData();
+  });
 
   const handleCreateJournal = async (e: React.FormEvent) => {
     e.preventDefault();

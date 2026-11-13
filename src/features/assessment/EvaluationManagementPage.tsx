@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { curriculumWorkspaceService } from '../../services/curriculumWorkspaceService';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   KisiKisiItem,
   SoalAsesmenItem,
@@ -118,6 +119,10 @@ export const EvaluationManagementPage: React.FC<EvaluationManagementPageProps> =
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_mi_kisi_items_v1', 'simpel_mi_soal_items_v1'], () => {
+    loadData();
+  });
 
   const notify = (msg: string) => {
     setNotification(msg);

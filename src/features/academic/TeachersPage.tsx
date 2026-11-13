@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
 import { Teacher } from '../../types/database.types';
 import { GraduationCap, Search, Plus, Edit2, Trash2, CheckCircle, Phone, Award } from 'lucide-react';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 
 export const TeachersPage: React.FC = () => {
   const [teachers, setTeachers] = useState<Teacher[]>([]);
@@ -37,6 +38,10 @@ export const TeachersPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_teachers', 'simpel_users_cache_v2'], () => {
+    void loadData();
+  });
 
   const openAddModal = () => {
     setEditingTeacherId(null);

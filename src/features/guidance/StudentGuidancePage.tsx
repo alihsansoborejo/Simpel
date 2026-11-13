@@ -3,6 +3,7 @@ import { guidanceService } from '../../services/guidanceService';
 import { academicService } from '../../services/academicService';
 import { StudentGuidanceRecord, Student, GuidanceStatus } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   HeartHandshake,
   Plus,
@@ -53,6 +54,10 @@ export const StudentGuidancePage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, [activeRole]);
+
+  useRealtimeSync(['simpel_student_guidance', 'simpel_students'], () => {
+    void loadData();
+  });
 
   const handleCreateRecord = async (e: React.FormEvent) => {
     e.preventDefault();

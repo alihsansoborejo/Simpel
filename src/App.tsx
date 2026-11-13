@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AppSettingsProvider } from './context/AppSettingsContext';
 import { GoogleDriveProvider } from './context/GoogleDriveContext';
+import { SyncProvider } from './context/SyncContext';
 import { LoginPage } from './features/auth/LoginPage';
 import { AppLayout } from './components/layout/AppLayout';
 import { DashboardPage } from './features/dashboard/DashboardPage';
@@ -327,12 +328,14 @@ const MainAppContent: React.FC = () => {
 
 export default function App() {
   return (
-    <AppSettingsProvider>
-      <AuthProvider>
-        <GoogleDriveProvider>
-          <MainAppContent />
-        </GoogleDriveProvider>
-      </AuthProvider>
-    </AppSettingsProvider>
+    <SyncProvider>
+      <AppSettingsProvider>
+        <AuthProvider>
+          <GoogleDriveProvider>
+            <MainAppContent />
+          </GoogleDriveProvider>
+        </AuthProvider>
+      </AppSettingsProvider>
+    </SyncProvider>
   );
 }

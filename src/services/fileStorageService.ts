@@ -6,6 +6,8 @@
  * untuk upload otomatis langsung ke Google Drive madrasah tanpa memerlukan popup login atau Firebase.
  */
 
+import { syncService } from './syncService';
+
 export interface StoredDocumentFile {
   id: string;
   name: string;
@@ -137,7 +139,7 @@ export const fileStorageService = {
       googleDriveUrl: driveUrl,
     };
 
-    return new Promise((resolve, reject) => {
+    const savedRecord = await new Promise<StoredDocumentFile>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       const req = store.put(docRecord);
@@ -145,39 +147,114 @@ export const fileStorageService = {
       req.onsuccess = () => resolve(docRecord);
       req.onerror = () => reject(req.error);
     });
+
+    // Sinkronkan berkas ke server agar langsung tersedia di seluruh perangkat (maks 18MB payload)
+    if ((savedRecord.dataUrl?.length || 0) <= 22 * 1024 * 1024) {
+      try {
+        await fetch('/api/sync/files', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clientId: syncService.getClientId(),
+            file: savedRecord,
+          }),
+        });
+        syncService.notifyFileSyncChanged();
+      } catch (err) {
+        console.warn('Gagal menyinkronkan berkas ke server:', err);
+      }
+    }
+
+    return savedRecord;
   },
 
   /**
-   * Ambil Seluruh Berkas Tersimpan dari IndexedDB
+   * Ambil Seluruh Berkas Tersimpan dari IndexedDB & gabungkan dengan server lintas perangkat
    */
   async getAllFiles(): Promise<StoredDocumentFile[]> {
+    let localFiles: StoredDocumentFile[] = [];
     try {
       const db = await openDatabase();
-      return new Promise((resolve, reject) => {
+      localFiles = await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readonly');
         const store = tx.objectStore(STORE_NAME);
         const req = store.getAll();
 
-        req.onsuccess = () => {
-          const results = (req.result || []) as StoredDocumentFile[];
-          // Urutkan dari yang terbaru
-          results.sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
-          resolve(results);
-        };
+        req.onsuccess = () => resolve((req.result || []) as StoredDocumentFile[]);
         req.onerror = () => reject(req.error);
       });
+
+      // Tarik berkas dari server agar file yang diunggah di perangkat lain langsung muncul
+      try {
+        const res = await fetch('/api/sync/files', { cache: 'no-store' });
+        if (res.ok) {
+          const json = await res.json();
+          const serverFiles: StoredDocumentFile[] = Array.isArray(json.files) ? json.files : [];
+          const deletedSet = new Set<string>(Array.isArray(json.deletedIds) ? json.deletedIds : []);
+          const mergedMap = new Map<string, StoredDocumentFile>();
+
+          // Server dianggap otoritatif untuk daftar berkas tersinkron
+          for (const sf of serverFiles) {
+            mergedMap.set(sf.id, sf);
+          }
+
+          // Hapus berkas lokal yang telah dihapus di perangkat lain
+          const idsToDeleteLocally: string[] = [];
+          const localOnly: StoredDocumentFile[] = [];
+          for (const lf of localFiles) {
+            if (deletedSet.has(lf.id)) {
+              idsToDeleteLocally.push(lf.id);
+            } else if (!mergedMap.has(lf.id)) {
+              localOnly.push(lf);
+              mergedMap.set(lf.id, lf);
+            }
+          }
+
+          // Sinkronkan cache IndexedDB lokal (upsert file baru & hapus yang didelete)
+          if (serverFiles.length > 0 || idsToDeleteLocally.length > 0) {
+            const writeTx = db.transaction(STORE_NAME, 'readwrite');
+            const writeStore = writeTx.objectStore(STORE_NAME);
+            for (const sf of serverFiles) {
+              writeStore.put(sf);
+            }
+            for (const delId of idsToDeleteLocally) {
+              writeStore.delete(delId);
+            }
+          }
+
+          // Dorong berkas lokal lama (sebelum fitur sync aktif) ke server bila ukurannya aman
+          for (const lf of localOnly) {
+            if ((lf.dataUrl?.length || 0) <= 22 * 1024 * 1024) {
+              void fetch('/api/sync/files', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ clientId: syncService.getClientId(), file: lf }),
+              }).catch(() => {});
+            }
+          }
+
+          const combined = Array.from(mergedMap.values());
+          combined.sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+          return combined;
+        }
+      } catch (err) {
+        console.warn('Sync files dari server dilewati (mode offline):', err);
+      }
+
+      localFiles.sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+      return localFiles;
     } catch (err) {
       console.warn('IndexedDB getAllFiles error:', err);
-      return [];
+      return localFiles;
     }
   },
 
   /**
-   * Hapus Berkas dari IndexedDB
+   * Hapus Berkas dari IndexedDB & Server Lintas Perangkat
    */
   async deleteFile(id: string): Promise<void> {
     const db = await openDatabase();
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       const req = store.delete(id);
@@ -185,6 +262,15 @@ export const fileStorageService = {
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
     });
+
+    try {
+      await fetch(`/api/sync/files/${encodeURIComponent(id)}?clientId=${encodeURIComponent(syncService.getClientId())}`, {
+        method: 'DELETE',
+      });
+      syncService.notifyFileSyncChanged();
+    } catch (err) {
+      console.warn('Gagal menghapus berkas dari server:', err);
+    }
   },
 
   /**

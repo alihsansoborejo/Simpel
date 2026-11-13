@@ -4,6 +4,7 @@ import { academicService } from '../../services/academicService';
 import { Assessment, Grade, Student, AssessmentType, TeachingAssignment } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   Award,
   Plus,
@@ -80,6 +81,10 @@ export const GradesPage: React.FC<GradesPageProps> = ({ onNavigate }) => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_assessments', 'simpel_grades', 'simpel_students', 'simpel_assignments'], () => {
+    void loadData();
+  });
 
   const handleSelectAssessment = async (asmId: string) => {
     setSelectedAssessmentId(asmId);

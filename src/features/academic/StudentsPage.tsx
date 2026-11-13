@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
 import { Student, ClassRoom, ClassMember } from '../../types/database.types';
 import { printDocumentDirectly } from '../../services/printService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   Users,
   Search,
@@ -62,6 +63,10 @@ export const StudentsPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_students', 'simpel_classes', 'simpel_class_members'], () => {
+    void loadData();
+  });
 
   const openAddModal = () => {
     setEditingStudentId(null);

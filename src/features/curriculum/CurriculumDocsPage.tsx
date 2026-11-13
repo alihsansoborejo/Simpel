@@ -4,6 +4,7 @@ import { DocumentLink, DocumentStatus } from '../../types/database.types';
 import { useAuth } from '../../context/AuthContext';
 import { useGoogleDrive } from '../../context/GoogleDriveContext';
 import { fileStorageService } from '../../services/fileStorageService';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   FolderSync,
   ExternalLink,
@@ -59,6 +60,10 @@ export const CurriculumDocsPage: React.FC = () => {
   useEffect(() => {
     loadDocs();
   }, []);
+
+  useRealtimeSync(['simpel_curriculum_documents', 'simpel_curriculum_reviews'], () => {
+    void loadDocs();
+  }, true);
 
   const DRIVE_REGEX = /^(https?:\/\/)?(drive|docs)\.google\.com\/(file\/d\/|document\/d\/|spreadsheets\/d\/|presentation\/d\/|drive\/folders\/|open\?id=|[a-zA-Z0-9_-]+).*/i;
 

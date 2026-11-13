@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { assessmentService, LearningAnalysisResult } from '../../services/assessmentService';
 import { Assessment } from '../../types/database.types';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   TrendingUp,
   Award,
@@ -39,6 +40,10 @@ export const LearningAnalysisPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useRealtimeSync(['simpel_assessments', 'simpel_grades', 'simpel_students'], () => {
+    void loadData();
+  });
 
   const handleSelectAsm = async (asmId: string) => {
     setSelectedAsmId(asmId);

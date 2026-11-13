@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 import {
   LifeBuoy,
   Plus,
@@ -75,6 +76,10 @@ export const IssueTrackingPage: React.FC = () => {
   useEffect(() => {
     loadIssues();
   }, []);
+
+  useRealtimeSync(['simpel_mi_issue_reports'], () => {
+    loadIssues();
+  });
 
   const saveIssuesToStorage = (updated: IssueReport[]) => {
     setIssues(updated);

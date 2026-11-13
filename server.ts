@@ -1,8 +1,11 @@
 import express, { Request, Response } from 'express';
+import http from 'http';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import { WebSocketServer, WebSocket } from 'ws';
 
 dotenv.config();
 
@@ -33,7 +36,367 @@ if (GEMINI_API_KEY) {
   console.log('[AI Studio] GEMINI_API_KEY not configured. Running with pedagogical template engine fallback.');
 }
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '25mb' }));
+
+// ==========================================
+// REAL-TIME CROSS-DEVICE SYNC ENGINE
+// ==========================================
+const DATA_DIR = path.resolve(__dirname, '.data');
+const SYNC_STATE_FILE = path.join(DATA_DIR, 'simpel-sync-state.json');
+const SYNC_FILES_FILE = path.join(DATA_DIR, 'simpel-sync-files.json');
+
+const LOCAL_ONLY_KEYS = new Set([
+  'simpel_mi_session_user',
+  'simpel_data_purged_sole_admin_v4',
+]);
+
+interface SyncEntry {
+  value: string | null;
+  updatedAt: string;
+  revision: number;
+}
+
+interface SyncStoreState {
+  revision: number;
+  entries: Record<string, SyncEntry>;
+}
+
+interface SyncedFileRecord {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  category: string;
+  description?: string;
+  uploadedBy: string;
+  uploadedAt: string;
+  dataUrl?: string;
+  googleDriveUrl?: string;
+  driveFileId?: string;
+}
+
+interface SyncFilesState {
+  revision: number;
+  files: SyncedFileRecord[];
+  deletedIds: string[];
+}
+
+function ensureDataDir(): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+}
+
+function loadSyncStateFromDisk(): SyncStoreState {
+  try {
+    ensureDataDir();
+    if (fs.existsSync(SYNC_STATE_FILE)) {
+      const raw = fs.readFileSync(SYNC_STATE_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.revision === 'number' && parsed.entries) {
+        return parsed as SyncStoreState;
+      }
+    }
+  } catch (err) {
+    console.warn('[Sync] Failed reading state file, starting fresh:', err);
+  }
+  return { revision: 0, entries: {} };
+}
+
+function loadSyncFilesFromDisk(): SyncFilesState {
+  try {
+    ensureDataDir();
+    if (fs.existsSync(SYNC_FILES_FILE)) {
+      const raw = fs.readFileSync(SYNC_FILES_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.files)) {
+        return {
+          revision: parsed.revision || 0,
+          files: parsed.files,
+          deletedIds: Array.isArray(parsed.deletedIds) ? parsed.deletedIds : [],
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('[Sync] Failed reading files state, starting fresh:', err);
+  }
+  return { revision: 0, files: [], deletedIds: [] };
+}
+
+const syncState: SyncStoreState = loadSyncStateFromDisk();
+const syncFilesState: SyncFilesState = loadSyncFilesFromDisk();
+
+let stateSaveTimer: NodeJS.Timeout | null = null;
+let filesSaveTimer: NodeJS.Timeout | null = null;
+
+function flushStateToDiskImmediate(): void {
+  try {
+    ensureDataDir();
+    const tmp = `${SYNC_STATE_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(syncState), 'utf-8');
+    fs.renameSync(tmp, SYNC_STATE_FILE);
+  } catch (err) {
+    console.error('[Sync] Error saving sync state to disk:', err);
+  }
+}
+
+function flushFilesToDiskImmediate(): void {
+  try {
+    ensureDataDir();
+    const tmp = `${SYNC_FILES_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(syncFilesState), 'utf-8');
+    fs.renameSync(tmp, SYNC_FILES_FILE);
+  } catch (err) {
+    console.error('[Sync] Error saving sync files to disk:', err);
+  }
+}
+
+function scheduleStateSave(): void {
+  if (stateSaveTimer) clearTimeout(stateSaveTimer);
+  stateSaveTimer = setTimeout(() => {
+    stateSaveTimer = null;
+    flushStateToDiskImmediate();
+  }, 40);
+}
+
+function scheduleFilesSave(): void {
+  if (filesSaveTimer) clearTimeout(filesSaveTimer);
+  filesSaveTimer = setTimeout(() => {
+    filesSaveTimer = null;
+    flushFilesToDiskImmediate();
+  }, 40);
+}
+
+process.on('SIGINT', () => {
+  flushStateToDiskImmediate();
+  flushFilesToDiskImmediate();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  flushStateToDiskImmediate();
+  flushFilesToDiskImmediate();
+  process.exit(0);
+});
+
+const wsClients = new Map<WebSocket, { clientId: string; connectedAt: number }>();
+const sseClients = new Map<Response, string>();
+
+function getActiveClientCount(): number {
+  const uniqueIds = new Set<string>();
+  wsClients.forEach((meta) => uniqueIds.add(meta.clientId));
+  sseClients.forEach((cid) => uniqueIds.add(cid));
+  return Math.max(1, uniqueIds.size);
+}
+
+function broadcastEvent(payload: Record<string, any>, excludeClientId?: string): void {
+  const encoded = JSON.stringify(payload);
+  wsClients.forEach((meta, socket) => {
+    if (excludeClientId && meta.clientId === excludeClientId) return;
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(encoded);
+    }
+  });
+  sseClients.forEach((cid, res) => {
+    if (excludeClientId && cid === excludeClientId) return;
+    try {
+      res.write(`data: ${encoded}\n\n`);
+    } catch {
+      sseClients.delete(res);
+    }
+  });
+}
+
+function broadcastPresence(): void {
+  const count = getActiveClientCount();
+  broadcastEvent({ type: 'presence:count', count });
+}
+
+function applySyncMutations(
+  clientId: string,
+  mutations: Array<{ key: string; value: string | null; updatedAt?: string }>
+): { revision: number; appliedKeys: string[]; deltaEntries: Record<string, SyncEntry> } {
+  const appliedKeys: string[] = [];
+  const deltaEntries: Record<string, SyncEntry> = {};
+
+  for (const mut of mutations) {
+    if (!mut || typeof mut.key !== 'string') continue;
+    if (!mut.key.startsWith('simpel_') || LOCAL_ONLY_KEYS.has(mut.key)) continue;
+
+    const existing = syncState.entries[mut.key];
+    const nextValue = mut.value === undefined ? null : mut.value;
+
+    // Idempotent check: skip redundant writes with identical payload
+    if (existing && existing.value === nextValue) {
+      continue;
+    }
+    if (!existing && nextValue === null) {
+      continue;
+    }
+
+    syncState.revision += 1;
+    const entry: SyncEntry = {
+      value: nextValue,
+      updatedAt: mut.updatedAt || new Date().toISOString(),
+      revision: syncState.revision,
+    };
+
+    if (nextValue === null) {
+      delete syncState.entries[mut.key];
+    } else {
+      syncState.entries[mut.key] = entry;
+    }
+
+    deltaEntries[mut.key] = entry;
+    appliedKeys.push(mut.key);
+  }
+
+  if (appliedKeys.length > 0) {
+    scheduleStateSave();
+    broadcastEvent(
+      {
+        type: 'sync:delta',
+        sourceClientId: clientId,
+        revision: syncState.revision,
+        entries: deltaEntries,
+      },
+      clientId
+    );
+  }
+
+  return { revision: syncState.revision, appliedKeys, deltaEntries };
+}
+
+// REST Endpoints untuk Sinkronisasi Cepat Antarperangkat
+app.get('/api/sync/state', (req: Request, res: Response) => {
+  const since = Number(req.query.since || 0);
+  if (since > 0) {
+    const deltaEntries: Record<string, SyncEntry> = {};
+    for (const [key, entry] of Object.entries(syncState.entries)) {
+      if (entry.revision > since) {
+        deltaEntries[key] = entry;
+      }
+    }
+    return res.json({
+      revision: syncState.revision,
+      full: false,
+      entries: deltaEntries,
+      activeClients: getActiveClientCount(),
+      serverTime: new Date().toISOString(),
+    });
+  }
+
+  res.json({
+    revision: syncState.revision,
+    full: true,
+    entries: syncState.entries,
+    activeClients: getActiveClientCount(),
+    serverTime: new Date().toISOString(),
+  });
+});
+
+app.post('/api/sync/batch', (req: Request, res: Response) => {
+  const { clientId = 'http-client', mutations = [] } = req.body || {};
+  if (!Array.isArray(mutations)) {
+    return res.status(400).json({ error: 'Format mutations tidak valid.' });
+  }
+  const result = applySyncMutations(String(clientId), mutations);
+  res.json({
+    success: true,
+    revision: result.revision,
+    appliedKeys: result.appliedKeys,
+  });
+});
+
+app.get('/api/sync/stream', (req: Request, res: Response) => {
+  const clientId = String(req.query.clientId || `sse-${Date.now()}`);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  sseClients.set(res, clientId);
+  res.write(`data: ${JSON.stringify({ type: 'sse:connected', revision: syncState.revision })}\n\n`);
+
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(keepAlive);
+    }
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    sseClients.delete(res);
+  });
+});
+
+// Synced Uploaded Files Endpoints
+app.get('/api/sync/files', (_req: Request, res: Response) => {
+  res.json({
+    revision: syncFilesState.revision,
+    files: syncFilesState.files,
+    deletedIds: syncFilesState.deletedIds,
+  });
+});
+
+app.post('/api/sync/files', (req: Request, res: Response) => {
+  const { clientId = 'http-client', file } = req.body || {};
+  if (!file || !file.id || !file.name) {
+    return res.status(400).json({ error: 'Metadata file tidak lengkap.' });
+  }
+
+  syncFilesState.deletedIds = syncFilesState.deletedIds.filter((d) => d !== file.id);
+  const idx = syncFilesState.files.findIndex((f) => f.id === file.id);
+  if (idx >= 0) {
+    syncFilesState.files[idx] = file;
+  } else {
+    syncFilesState.files.unshift(file);
+  }
+  syncFilesState.revision += 1;
+  scheduleFilesSave();
+
+  broadcastEvent(
+    {
+      type: 'sync:file:upsert',
+      sourceClientId: String(clientId),
+      file,
+      revision: syncFilesState.revision,
+    },
+    String(clientId)
+  );
+
+  res.json({ success: true, revision: syncFilesState.revision, file });
+});
+
+app.delete('/api/sync/files/:id', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const clientId = String(req.query.clientId || 'http-client');
+  const prevLen = syncFilesState.files.length;
+  syncFilesState.files = syncFilesState.files.filter((f) => f.id !== id);
+  if (!syncFilesState.deletedIds.includes(id)) {
+    syncFilesState.deletedIds.push(id);
+    if (syncFilesState.deletedIds.length > 500) {
+      syncFilesState.deletedIds.shift();
+    }
+  }
+
+  if (syncFilesState.files.length !== prevLen) {
+    syncFilesState.revision += 1;
+    scheduleFilesSave();
+    broadcastEvent(
+      {
+        type: 'sync:file:delete',
+        sourceClientId: clientId,
+        id,
+        revision: syncFilesState.revision,
+      },
+      clientId
+    );
+  }
+
+  res.json({ success: true, revision: syncFilesState.revision });
+});
 
 // In-Memory AI Audit Logs Store (Syncable to client / Supabase)
 interface AuditLogRecord {
@@ -1390,15 +1753,104 @@ Ada yang bisa saya bantu hari ini untuk mempermudah kegiatan belajar mengajar Ba
 });
 
 // ==========================================
-// VITE DEV SERVER / PRODUCTION STATIC
+// VITE DEV SERVER / PRODUCTION STATIC + WEBSOCKET SYNC
 // ==========================================
 async function startServer() {
+  const httpServer = http.createServer(app);
   const isProd = process.env.NODE_ENV === 'production';
+
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws/sync' });
+
+  wss.on('connection', (ws, req) => {
+    const reqUrl = new URL(req.url || '/ws/sync', `http://localhost:${PORT}`);
+    const clientId = reqUrl.searchParams.get('clientId') || `ws-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+    wsClients.set(ws, { clientId, connectedAt: Date.now() });
+
+    // Kirim state otoritatif awal secara instan saat koneksi terbuka
+    ws.send(
+      JSON.stringify({
+        type: 'sync:init',
+        revision: syncState.revision,
+        entries: syncState.entries,
+        fileRevision: syncFilesState.revision,
+        activeClients: getActiveClientCount(),
+        serverTime: new Date().toISOString(),
+      })
+    );
+    broadcastPresence();
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (!msg || !msg.type) return;
+
+        if (msg.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong', serverTime: new Date().toISOString() }));
+          return;
+        }
+
+        if (msg.type === 'sync:pull') {
+          const since = Number(msg.since || 0);
+          if (since > 0) {
+            const deltaEntries: Record<string, SyncEntry> = {};
+            for (const [key, entry] of Object.entries(syncState.entries)) {
+              if (entry.revision > since) {
+                deltaEntries[key] = entry;
+              }
+            }
+            ws.send(
+              JSON.stringify({
+                type: 'sync:state',
+                revision: syncState.revision,
+                entries: deltaEntries,
+                activeClients: getActiveClientCount(),
+              })
+            );
+          } else {
+            ws.send(
+              JSON.stringify({
+                type: 'sync:state',
+                revision: syncState.revision,
+                entries: syncState.entries,
+                activeClients: getActiveClientCount(),
+              })
+            );
+          }
+          return;
+        }
+
+        if (msg.type === 'sync:patch' && Array.isArray(msg.mutations)) {
+          const senderId = String(msg.clientId || clientId);
+          const result = applySyncMutations(senderId, msg.mutations);
+          ws.send(
+            JSON.stringify({
+              type: 'sync:ack',
+              revision: result.revision,
+              keys: result.appliedKeys,
+            })
+          );
+        }
+      } catch (err) {
+        console.warn('[Sync WS] Invalid message:', err);
+      }
+    });
+
+    ws.on('close', () => {
+      wsClients.delete(ws);
+      broadcastPresence();
+    });
+
+    ws.on('error', () => {
+      wsClients.delete(ws);
+      broadcastPresence();
+    });
+  });
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1412,8 +1864,8 @@ async function startServer() {
     console.log('[AI Studio] Production static server mounted for dist.');
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[AI Studio] Server SIMPEL MI AL IHSAN running on http://0.0.0.0:${PORT}`);
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`[AI Studio] Server SIMPEL MI AL IHSAN running on http://0.0.0.0:${PORT} (WebSocket /ws/sync active)`);
   });
 }
 
