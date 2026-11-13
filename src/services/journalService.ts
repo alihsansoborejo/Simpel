@@ -50,16 +50,18 @@ export const journalService = {
   },
 
   async createJournal(payload: Omit<TeachingJournal, 'id' | 'created_at' | 'updated_at'>): Promise<TeachingJournal> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `jrn-${Date.now()}`;
     const newJournal: TeachingJournal = {
       ...payload,
-      id: `jrn-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('teaching_journals').insert(newJournal).select().single();
+        const { assignment: _a, ...dbPayload } = newJournal;
+        const { data } = await supabase.from('teaching_journals').insert(dbPayload).select().single();
         if (data) return data as TeachingJournal;
       } catch (err) {
         console.warn('Supabase createJournal fallback:', err);

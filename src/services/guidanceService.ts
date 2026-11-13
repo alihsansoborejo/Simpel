@@ -56,9 +56,10 @@ export const guidanceService = {
   async createGuidanceRecord(
     payload: Omit<StudentGuidanceRecord, 'id' | 'created_at' | 'updated_at'>
   ): Promise<StudentGuidanceRecord> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `gd-${Date.now()}`;
     const newRecord: StudentGuidanceRecord = {
       ...payload,
-      id: `gd-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       student: DEMO_STUDENTS.find((s) => s.id === payload.student_id),
@@ -66,7 +67,8 @@ export const guidanceService = {
 
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('student_guidance_records').insert(newRecord).select().single();
+        const { student: _s, recorder: _r, ...dbPayload } = newRecord;
+        const { data } = await supabase.from('student_guidance_records').insert(dbPayload).select().single();
         if (data) return data as StudentGuidanceRecord;
       } catch (err) {
         console.warn('Supabase createGuidanceRecord fallback:', err);

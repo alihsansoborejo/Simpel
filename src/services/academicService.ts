@@ -96,9 +96,10 @@ export const academicService = {
   },
 
   async createAcademicYear(payload: Omit<AcademicYear, 'id' | 'created_at'>): Promise<AcademicYear> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ay-${Date.now()}`;
     const newYear: AcademicYear = {
       ...payload,
-      id: `ay-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
     };
     if (isSupabaseConfigured) {
@@ -170,14 +171,16 @@ export const academicService = {
   },
 
   async createClass(payload: Omit<ClassRoom, 'id' | 'created_at'>): Promise<ClassRoom> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `cls-${Date.now()}`;
     const newClass: ClassRoom = {
       ...payload,
-      id: `cls-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
     };
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('classes').insert(newClass).select().single();
+        const { homeroom_teacher_id: _hr, homeroom_teacher: _ht, ...dbClass } = newClass;
+        const { data } = await supabase.from('classes').insert(dbClass).select().single();
         if (data) return data as ClassRoom;
       } catch (err) {
         console.warn('Supabase createClass fallback:', err);
@@ -258,9 +261,10 @@ export const academicService = {
   },
 
   async createStudent(payload: Omit<Student, 'id' | 'created_at' | 'updated_at'>): Promise<Student> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `std-${Date.now()}`;
     const newStudent: Student = {
       ...payload,
-      id: `std-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -323,9 +327,10 @@ export const academicService = {
   },
 
   async createTeacher(payload: Omit<Teacher, 'id' | 'created_at' | 'updated_at'>): Promise<Teacher> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tch-${Date.now()}`;
     const newTeacher: Teacher = {
       ...payload,
-      id: `tch-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -474,9 +479,10 @@ export const academicService = {
   },
 
   async createSubject(payload: Omit<Subject, 'id' | 'created_at'>): Promise<Subject> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `sbj-${Date.now()}`;
     const newSubject: Subject = {
       ...payload,
-      id: `sbj-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
     };
     if (isSupabaseConfigured) {

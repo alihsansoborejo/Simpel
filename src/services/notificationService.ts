@@ -172,16 +172,29 @@ export const notificationService = {
   },
 
   async addNotification(payload: Omit<AppNotification, 'id' | 'is_read' | 'created_at'>): Promise<AppNotification> {
+    const id =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const newNotif: AppNotification = {
       ...payload,
-      id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id,
       is_read: false,
       created_at: new Date().toISOString(),
     };
 
     if (isSupabaseConfigured) {
       try {
-        await supabase.from('notifications').insert(newNotif);
+        await supabase.from('notifications').insert({
+          id: newNotif.id,
+          recipient_id: newNotif.recipient_id ?? null,
+          target_role: newNotif.target_role ?? 'semua',
+          category: newNotif.category ?? 'akademik',
+          title: newNotif.title,
+          message: newNotif.message,
+          action_url: newNotif.action_url ?? null,
+          is_read: newNotif.is_read,
+        });
       } catch (err) {
         console.warn('Supabase addNotification fallback:', err);
       }

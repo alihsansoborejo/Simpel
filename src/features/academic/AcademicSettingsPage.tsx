@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
 import { AcademicYear, Semester, SystemSettings } from '../../types/database.types';
-import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School, Copy, Download, ExternalLink, Terminal, CheckCircle2 } from 'lucide-react';
+import { isSupabaseConfigured, supabase, getSupabaseConfigStatus } from '../../lib/supabaseClient';
+import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School, Copy, Download, ExternalLink, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
 
 export const AcademicSettingsPage: React.FC = () => {
@@ -18,6 +19,69 @@ export const AcademicSettingsPage: React.FC = () => {
   const [newYearStart, setNewYearStart] = useState<string>('2027-07-15');
   const [newYearEnd, setNewYearEnd] = useState<string>('2028-06-25');
   const [isCopied, setIsCopied] = useState<boolean>(false);
+  const [dbCheckState, setDbCheckState] = useState<{
+    checking: boolean;
+    reachable: boolean;
+    tablesReady: number;
+    totalChecked: number;
+    errorMessage: string | null;
+  }>({
+    checking: false,
+    reachable: false,
+    tablesReady: 0,
+    totalChecked: 8,
+    errorMessage: null,
+  });
+
+  const supabaseStatus = getSupabaseConfigStatus();
+
+  const checkSupabaseConnection = async () => {
+    if (!isSupabaseConfigured) {
+      setDbCheckState({
+        checking: false,
+        reachable: false,
+        tablesReady: 0,
+        totalChecked: 8,
+        errorMessage: 'Variabel lingkungan VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY belum diatur.',
+      });
+      return;
+    }
+
+    setDbCheckState((prev) => ({ ...prev, checking: true, errorMessage: null }));
+    const tablesToCheck = [
+      'system_settings',
+      'academic_years',
+      'semesters',
+      'classes',
+      'teachers',
+      'students',
+      'supervision_records',
+      'notifications',
+    ];
+
+    try {
+      const results = await Promise.all(
+        tablesToCheck.map((tbl) => supabase.from(tbl).select('id', { count: 'exact', head: true }))
+      );
+      const readyCount = results.filter((r) => !r.error || r.error.code !== '42P01').length;
+      const firstErr = results.find((r) => r.error)?.error;
+      setDbCheckState({
+        checking: false,
+        reachable: true,
+        tablesReady: readyCount,
+        totalChecked: tablesToCheck.length,
+        errorMessage: firstErr ? `${firstErr.message} (${firstErr.code || 'Error'})` : null,
+      });
+    } catch (err: any) {
+      setDbCheckState({
+        checking: false,
+        reachable: false,
+        tablesReady: 0,
+        totalChecked: tablesToCheck.length,
+        errorMessage: err?.message || 'Gagal menghubungi endpoint Supabase.',
+      });
+    }
+  };
 
   const handleCopySql = async () => {
     try {
@@ -53,6 +117,7 @@ export const AcademicSettingsPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
+    void checkSupabaseConnection();
   }, []);
 
   useRealtimeSync(['simpel_settings', 'simpel_academic_years', 'simpel_semesters'], () => {
@@ -132,9 +197,19 @@ export const AcademicSettingsPage: React.FC = () => {
             Konfigurasi identitas madrasah, penetapan tahun pelajaran berjalan, semester, dan nilai KKTP default.
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-emerald-800 font-medium bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200">
-          <Database className="w-4 h-4 text-emerald-700" />
-          <span>Tersinkronisasi dengan Database PostgreSQL</span>
+        <div
+          className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-lg border ${
+            isSupabaseConfigured
+              ? 'text-emerald-800 bg-emerald-50 border-emerald-200'
+              : 'text-amber-800 bg-amber-50 border-amber-200'
+          }`}
+        >
+          <Database className={`w-4 h-4 ${isSupabaseConfigured ? 'text-emerald-700' : 'text-amber-600'}`} />
+          <span>
+            {isSupabaseConfigured
+              ? 'Tersinkronisasi dengan Database PostgreSQL (Supabase)'
+              : 'Sinkronisasi Server Real-Time Aktif (Env Supabase Belum Diatur)'}
+          </span>
         </div>
       </div>
 
@@ -360,26 +435,62 @@ export const AcademicSettingsPage: React.FC = () => {
 
           {/* Card Status Supabase & Skrip Migrasi SQL */}
           <div className="bg-gradient-to-br from-emerald-950 via-slate-900 to-slate-950 text-white rounded-xl border border-emerald-800/60 shadow-md p-5 space-y-4">
-            <div className="flex items-center justify-between pb-2 border-b border-emerald-800/60">
+            <div className="flex items-center justify-between pb-2 border-b border-emerald-800/60 gap-2">
               <div className="flex items-center gap-2">
-                <Database className="w-5 h-5 text-amber-400" />
+                <Database className="w-5 h-5 text-amber-400 shrink-0" />
                 <h3 className="text-sm font-bold text-white">Database Supabase Madrasah</h3>
               </div>
-              <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                Terhubung (Connected)
-              </span>
+              {isSupabaseConfigured && dbCheckState.reachable && dbCheckState.tablesReady === dbCheckState.totalChecked && !dbCheckState.errorMessage ? (
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shrink-0">
+                  Terhubung ({dbCheckState.tablesReady}/{dbCheckState.totalChecked} Tabel)
+                </span>
+              ) : isSupabaseConfigured ? (
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0">
+                  Perlu Cek ({dbCheckState.tablesReady}/{dbCheckState.totalChecked})
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0">
+                  Env Belum Diatur
+                </span>
+              )}
             </div>
 
             <div className="space-y-2 text-xs">
               <div className="p-2.5 rounded-lg bg-white/5 border border-white/10 space-y-1">
-                <span className="text-[10px] text-emerald-300 uppercase font-semibold block">Endpoint API Project:</span>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-emerald-300 uppercase font-semibold block">Status Konfigurasi:</span>
+                  {isSupabaseConfigured && (
+                    <button
+                      type="button"
+                      onClick={() => void checkSupabaseConnection()}
+                      disabled={dbCheckState.checking}
+                      className="inline-flex items-center gap-1 text-[10px] text-amber-300 hover:text-amber-200 font-semibold"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${dbCheckState.checking ? 'animate-spin' : ''}`} />
+                      <span>Uji Ulang</span>
+                    </button>
+                  )}
+                </div>
                 <span className="font-mono text-[11px] text-slate-200 block truncate">
-                  https://pwdhltrxdijsmmrsuheb.supabase.co
+                  {isSupabaseConfigured ? supabaseStatus.url : 'VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY belum disetel'}
                 </span>
               </div>
 
+              {!isSupabaseConfigured ? (
+                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-400/30 text-[11px] text-amber-200 leading-relaxed flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <span>
+                    Aplikasi saat ini menggunakan <strong>Sinkronisasi Server Real-Time</strong>. Untuk menghubungkan langsung ke Supabase, tambahkan <code className="text-white">VITE_SUPABASE_URL</code> dan <code className="text-white">VITE_SUPABASE_ANON_KEY</code> pada pengaturan <strong>Secrets / Environment Variables</strong>.
+                  </span>
+                </div>
+              ) : dbCheckState.errorMessage ? (
+                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-400/30 text-[11px] text-amber-200 leading-relaxed">
+                  Catatan verifikasi: {dbCheckState.errorMessage}
+                </div>
+              ) : null}
+
               <p className="text-[11px] text-slate-300 leading-relaxed">
-                Skrip migrasi database lengkap (42 tabel, RLS, trigger, fungsi, dan seed data Tahap 2) telah siap. Jalankan sekali pada Supabase SQL Editor untuk mengaktifkan seluruh fitur.
+                Skrip migrasi database lengkap (42 tabel termasuk kolom logo/identitas madrasah, RLS, trigger, fungsi, dan seed data) telah siap dijalankan pada Supabase SQL Editor.
               </p>
             </div>
 

@@ -80,15 +80,17 @@ export const assessmentService = {
   },
 
   async createAssessment(payload: Omit<Assessment, 'id' | 'created_at'>): Promise<Assessment> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `asm-${Date.now()}`;
     const newAsm: Assessment = {
       ...payload,
-      id: `asm-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
     };
 
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('assessments').insert(newAsm).select().single();
+        const { assignment: _a, ...dbAsm } = newAsm;
+        const { data } = await supabase.from('assessments').insert(dbAsm).select().single();
         if (data) return data as Assessment;
       } catch (err) {
         console.warn('Supabase createAssessment fallback:', err);
@@ -203,16 +205,18 @@ export const assessmentService = {
   },
 
   async createRemedialRecord(payload: Omit<RemedialRecord, 'id' | 'created_at'>): Promise<RemedialRecord> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `rem-${Date.now()}`;
     const newRecord: RemedialRecord = {
       ...payload,
-      id: `rem-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
       student: DEMO_STUDENTS.find((s) => s.id === payload.student_id),
     };
 
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('remedial_records').insert(newRecord).select().single();
+        const { student: _s, assignment: _a, ...dbPayload } = newRecord;
+        const { data } = await supabase.from('remedial_records').insert(dbPayload).select().single();
         if (data) return data as RemedialRecord;
       } catch (err) {
         console.warn('Supabase createRemedialRecord fallback:', err);
@@ -249,16 +253,18 @@ export const assessmentService = {
   },
 
   async createEnrichmentRecord(payload: Omit<EnrichmentRecord, 'id' | 'created_at'>): Promise<EnrichmentRecord> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `enr-${Date.now()}`;
     const newRecord: EnrichmentRecord = {
       ...payload,
-      id: `enr-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
       student: DEMO_STUDENTS.find((s) => s.id === payload.student_id),
     };
 
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('enrichment_records').insert(newRecord).select().single();
+        const { student: _s, assignment: _a, ...dbPayload } = newRecord;
+        const { data } = await supabase.from('enrichment_records').insert(dbPayload).select().single();
         if (data) return data as EnrichmentRecord;
       } catch (err) {
         console.warn('Supabase createEnrichmentRecord fallback:', err);

@@ -43,7 +43,7 @@ export const supervisionService = {
     if (isSupabaseConfigured) {
       try {
         let query = supabase
-          .from('supervision_records_new')
+          .from('supervision_records')
           .select('*, teacher:teachers(*), class:classes(*), subject:subjects(*), supervisor:profiles(*)')
           .order('supervision_date', { ascending: false });
 
@@ -76,9 +76,10 @@ export const supervisionService = {
   async createRecord(
     payload: Omit<SupervisionRecord, 'id' | 'created_at' | 'updated_at'>
   ): Promise<SupervisionRecord> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `spv-${Date.now()}`;
     const newRecord: SupervisionRecord = {
       ...payload,
-      id: `spv-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       teacher: DEMO_TEACHERS.find((t) => t.id === payload.teacher_id),
@@ -89,7 +90,8 @@ export const supervisionService = {
 
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('supervision_records_new').insert(newRecord).select().single();
+        const { teacher: _t, class: _c, subject: _s, supervisor: _sup, results: _res, followups: _f, ...dbPayload } = newRecord;
+        const { data } = await supabase.from('supervision_records').insert(dbPayload).select().single();
         if (data) return data as SupervisionRecord;
       } catch (err) {
         console.warn('Supabase createRecord fallback:', err);
@@ -115,7 +117,8 @@ export const supervisionService = {
 
     if (isSupabaseConfigured) {
       try {
-        await supabase.from('supervision_records_new').update(updates).eq('id', id);
+        const { teacher: _t, class: _c, subject: _s, supervisor: _sup, results: _res, followups: _f, ...dbUpdates } = updates;
+        await supabase.from('supervision_records').update(dbUpdates).eq('id', id);
       } catch (err) {
         console.warn('Supabase updateRecord fallback:', err);
       }

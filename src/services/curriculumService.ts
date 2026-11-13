@@ -61,16 +61,18 @@ export const curriculumService = {
   },
 
   async createDocument(payload: Omit<DocumentLink, 'id' | 'created_at' | 'updated_at'>): Promise<DocumentLink> {
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `doc-${Date.now()}`;
     const newDoc: DocumentLink = {
       ...payload,
-      id: `doc-${Date.now()}`,
+      id,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
     if (isSupabaseConfigured) {
       try {
-        const { data } = await supabase.from('document_links').insert(newDoc).select().single();
+        const { teacher: _t, ...dbDoc } = newDoc;
+        const { data } = await supabase.from('document_links').insert(dbDoc).select().single();
         if (data) return data as DocumentLink;
       } catch (err) {
         console.warn('Supabase createDocument fallback:', err);
@@ -124,8 +126,9 @@ export const curriculumService = {
       status: decision,
     });
 
+    const revId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `rev-${Date.now()}`;
     const newReview: DocumentReview = {
-      id: `rev-${Date.now()}`,
+      id: revId,
       document_link_id: documentId,
       reviewed_by: reviewerId,
       status_decision: decision,
@@ -135,7 +138,8 @@ export const curriculumService = {
 
     if (isSupabaseConfigured) {
       try {
-        await supabase.from('document_reviews').insert(newReview);
+        const { reviewer: _r, ...dbReview } = newReview;
+        await supabase.from('document_reviews').insert(dbReview);
       } catch (err) {
         console.warn('Supabase reviewDocument fallback:', err);
       }

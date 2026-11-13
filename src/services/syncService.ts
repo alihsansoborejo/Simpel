@@ -76,6 +76,9 @@ class RealtimeSyncService {
   private flushTimer: number | null = null;
   private reconnectTimer: number | null = null;
   private reconnectAttempts = 0;
+  private wsConsecutiveFailures = 0;
+  private readonly maxWsFailures = 3;
+  private httpConnected = false;
   private heartbeatTimer: number | null = null;
   private deltaPollTimer: number | null = null;
   private lastKnownValues = new Map<string, string | null>();
@@ -218,10 +221,11 @@ class RealtimeSyncService {
       if (typeof json.revision === 'number') {
         this.lastRevision = Math.max(this.lastRevision, json.revision);
       }
+      this.httpConnected = true;
       this.lastSyncedAt = new Date().toISOString();
-      this.status = 'connected';
-      this.emitStatus();
+      this.updateConnectionStatus();
     } catch (err) {
+      this.httpConnected = false;
       // Re-queue failed batch for retry
       batch.forEach((m) => {
         if (!this.pendingMutations.has(m.key)) {
@@ -389,12 +393,12 @@ class RealtimeSyncService {
         await this.seedServerWithInitialLocalState();
       }
 
+      this.httpConnected = true;
       this.lastSyncedAt = new Date().toISOString();
-      if (this.ws?.readyState === WebSocket.OPEN || navigator.onLine) {
-        this.status = 'connected';
-      }
-      this.emitStatus();
+      this.updateConnectionStatus();
     } catch (err) {
+      this.httpConnected = false;
+      this.updateConnectionStatus();
       console.warn('[Sync] Pull skipped/retried:', err);
     } finally {
       this.isPulling = false;
@@ -447,8 +451,9 @@ class RealtimeSyncService {
 
       ws.onopen = () => {
         this.reconnectAttempts = 0;
-        this.status = 'connected';
-        this.emitStatus();
+        this.wsConsecutiveFailures = 0;
+        this.httpConnected = true;
+        this.updateConnectionStatus();
 
         if (this.pendingMutations.size > 0) {
           void this.flushMutations();
@@ -512,17 +517,33 @@ class RealtimeSyncService {
           this.heartbeatTimer = null;
         }
         this.ws = null;
-        this.status = navigator.onLine ? 'reconnecting' : 'offline';
-        this.emitStatus();
-        this.scheduleReconnect();
+        this.wsConsecutiveFailures++;
+        this.updateConnectionStatus();
+        if (this.wsConsecutiveFailures < this.maxWsFailures) {
+          this.scheduleReconnect();
+        }
       };
 
       ws.onerror = () => {
         // Handled cleanly in onclose
       };
     } catch {
-      this.scheduleReconnect();
+      this.wsConsecutiveFailures++;
+      if (this.wsConsecutiveFailures < this.maxWsFailures) {
+        this.scheduleReconnect();
+      }
     }
+  }
+
+  private updateConnectionStatus(): void {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      this.status = 'offline';
+    } else if (this.ws?.readyState === WebSocket.OPEN || this.httpConnected) {
+      this.status = 'connected';
+    } else {
+      this.status = 'reconnecting';
+    }
+    this.emitStatus();
   }
 
   private setupSSEFallback(): void {
@@ -530,6 +551,10 @@ class RealtimeSyncService {
     try {
       const sse = new EventSource(`/api/sync/stream?clientId=${encodeURIComponent(this.clientId)}`);
       this.sse = sse;
+      sse.onopen = () => {
+        this.httpConnected = true;
+        this.updateConnectionStatus();
+      };
       sse.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
@@ -620,8 +645,9 @@ class RealtimeSyncService {
       this.initSupabaseRealtimeBridge();
 
       window.addEventListener('online', () => {
-        this.status = 'reconnecting';
-        this.emitStatus();
+        this.wsConsecutiveFailures = 0;
+        this.reconnectAttempts = 0;
+        this.updateConnectionStatus();
         void this.flushMutations();
         this.connectWebSocket();
         void this.pullFromServer(this.lastRevision);
@@ -634,7 +660,7 @@ class RealtimeSyncService {
 
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
-          if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+          if ((!this.ws || this.ws.readyState !== WebSocket.OPEN) && this.wsConsecutiveFailures < this.maxWsFailures) {
             this.connectWebSocket();
           }
           void this.pullFromServer(this.lastRevision);
@@ -651,12 +677,16 @@ class RealtimeSyncService {
   public async syncNow(): Promise<void> {
     this.status = 'syncing';
     this.emitStatus();
+    this.wsConsecutiveFailures = 0;
+    this.reconnectAttempts = 0;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.connectWebSocket();
+    }
     await this.flushMutations();
     await this.pullFromServer(0);
     window.dispatchEvent(new CustomEvent('simpel:remote-sync', { detail: { keys: ['*'], manual: true } }));
     window.dispatchEvent(new CustomEvent('simpel:remote-file-sync', { detail: { manual: true } }));
-    this.status = this.ws?.readyState === WebSocket.OPEN || navigator.onLine ? 'connected' : 'reconnecting';
-    this.emitStatus();
+    this.updateConnectionStatus();
   }
 
   public notifyFileSyncChanged(): void {
