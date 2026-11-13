@@ -906,8 +906,9 @@ DECLARE
         'teaching_journals', 'student_attendance', 'learning_evidence', 'learning_progress',
         'assessments', 'assessment_components', 'grades', 'grade_audit_logs',
         'remedial_records', 'enrichment_records', 'final_grades', 'student_descriptions', 'report_cards',
-        'document_links', 'document_link_versions', 'document_reviews', 'supervision_records',
-        'student_guidance_records', 'notifications', 'ai_generations', 'activity_logs'
+        'document_links', 'document_link_versions', 'document_reviews', 'supervision_instruments',
+        'supervision_aspects', 'supervision_indicators', 'supervision_records', 'supervision_results',
+        'supervision_followups', 'student_guidance_records', 'notifications', 'ai_generations', 'activity_logs'
     ];
 BEGIN
     FOREACH tbl IN ARRAY tables LOOP
@@ -968,7 +969,7 @@ BEGIN
         EXECUTE format('
             DROP POLICY IF EXISTS %I_read_auth ON public.%I;
             CREATE POLICY %I_read_auth ON public.%I FOR SELECT TO authenticated USING (TRUE);
-        ', tbl, tbl);
+        ', tbl, tbl, tbl, tbl);
     END LOOP;
 END $$;
 
@@ -1147,30 +1148,37 @@ CREATE POLICY "doc_reviews_write" ON public.document_reviews
     WITH CHECK (public.is_principal() OR public.is_admin());
 
 -- MODUL SUPERVISI TERSTRUKTUR POLICIES
+DROP POLICY IF EXISTS "supervision_instruments_read" ON public.supervision_instruments;
 CREATE POLICY "supervision_instruments_read" ON public.supervision_instruments
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_instruments_manage" ON public.supervision_instruments;
 CREATE POLICY "supervision_instruments_manage" ON public.supervision_instruments
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
     WITH CHECK (public.is_admin() OR public.has_role('kepala_madrasah'));
 
+DROP POLICY IF EXISTS "supervision_aspects_read" ON public.supervision_aspects;
 CREATE POLICY "supervision_aspects_read" ON public.supervision_aspects
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_aspects_manage" ON public.supervision_aspects;
 CREATE POLICY "supervision_aspects_manage" ON public.supervision_aspects
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
     WITH CHECK (public.is_admin() OR public.has_role('kepala_madrasah'));
 
+DROP POLICY IF EXISTS "supervision_indicators_read" ON public.supervision_indicators;
 CREATE POLICY "supervision_indicators_read" ON public.supervision_indicators
     FOR SELECT TO authenticated USING (TRUE);
 
+DROP POLICY IF EXISTS "supervision_indicators_manage" ON public.supervision_indicators;
 CREATE POLICY "supervision_indicators_manage" ON public.supervision_indicators
     FOR ALL TO authenticated
     USING (public.is_admin() OR public.has_role('kepala_madrasah'))
     WITH CHECK (public.is_admin() OR public.has_role('kepala_madrasah'));
 
+DROP POLICY IF EXISTS "supervision_records_select" ON public.supervision_records;
 CREATE POLICY "supervision_records_select" ON public.supervision_records
     FOR SELECT TO authenticated
     USING (
@@ -1178,10 +1186,12 @@ CREATE POLICY "supervision_records_select" ON public.supervision_records
         OR (teacher_id = public.get_current_teacher_id() AND is_shared_with_teacher = TRUE)
     );
 
+DROP POLICY IF EXISTS "supervision_records_insert" ON public.supervision_records;
 CREATE POLICY "supervision_records_insert" ON public.supervision_records
     FOR INSERT TO authenticated
     WITH CHECK (public.is_principal());
 
+DROP POLICY IF EXISTS "supervision_records_update" ON public.supervision_records;
 CREATE POLICY "supervision_records_update" ON public.supervision_records
     FOR UPDATE TO authenticated
     USING (
@@ -1193,10 +1203,12 @@ CREATE POLICY "supervision_records_update" ON public.supervision_records
         OR (teacher_id = public.get_current_teacher_id() AND is_shared_with_teacher = TRUE)
     );
 
+DROP POLICY IF EXISTS "supervision_records_delete" ON public.supervision_records;
 CREATE POLICY "supervision_records_delete" ON public.supervision_records
     FOR DELETE TO authenticated
     USING (public.is_admin());
 
+DROP POLICY IF EXISTS "supervision_results_select" ON public.supervision_results;
 CREATE POLICY "supervision_results_select" ON public.supervision_results
     FOR SELECT TO authenticated
     USING (
@@ -1209,11 +1221,13 @@ CREATE POLICY "supervision_results_select" ON public.supervision_results
         )
     );
 
+DROP POLICY IF EXISTS "supervision_results_manage" ON public.supervision_results;
 CREATE POLICY "supervision_results_manage" ON public.supervision_results
     FOR ALL TO authenticated
     USING (public.is_principal())
     WITH CHECK (public.is_principal());
 
+DROP POLICY IF EXISTS "supervision_followups_select" ON public.supervision_followups;
 CREATE POLICY "supervision_followups_select" ON public.supervision_followups
     FOR SELECT TO authenticated
     USING (
@@ -1226,6 +1240,7 @@ CREATE POLICY "supervision_followups_select" ON public.supervision_followups
         )
     );
 
+DROP POLICY IF EXISTS "supervision_followups_manage" ON public.supervision_followups;
 CREATE POLICY "supervision_followups_manage" ON public.supervision_followups
     FOR ALL TO authenticated
     USING (

@@ -20,7 +20,7 @@ export const AcademicSettingsPage: React.FC = () => {
 
   const handleCopySql = async () => {
     try {
-      const res = await fetch('/full_migration_all_in_one.sql');
+      const res = await fetch('/full_migration_all_in_one.sql', { cache: 'no-store' });
       const text = await res.text();
       await navigator.clipboard.writeText(text);
       setIsCopied(true);
