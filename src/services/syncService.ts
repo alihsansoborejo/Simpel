@@ -2,8 +2,9 @@
  * Real-Time Cross-Device Synchronization Service (SIMPEL MI AL IHSAN)
  *
  * Arsitektur Sinkronisasi:
- * 1. Server-Authoritative State via WebSocket (/ws/sync) + HTTP Batch (/api/sync/batch)
- *    + Server-Sent Events (/api/sync/stream) fallback.
+ * 1. Server-Authoritative State via WebSocket (/ws/sync) dengan ACK verification,
+ *    HTTP Batch (/api/sync/batch) untuk payload besar / fallback,
+ *    Server-Sent Events (/api/sync/stream), dan adaptive delta check (/api/sync/state?since=...).
  * 2. Multi-tab sync instan via BroadcastChannel('simpel_sync_channel').
  * 3. Transparent localStorage interception untuk seluruh key `simpel_*` (kecuali session & flag lokal perangkat).
  * 4. Offline & reconnect mutation queue + pull delta pada focus/online/reconnect.
@@ -46,7 +47,11 @@ function getOrCreateClientId(): string {
 
 const INTERCEPTOR_FLAG = '__simpelSyncIntercepted';
 const nativeSetItem = Storage.prototype.setItem;
+const nativeGetItem = Storage.prototype.getItem;
 const nativeRemoveItem = Storage.prototype.removeItem;
+
+// Batas aman payload WebSocket agar tidak diputus reverse proxy (128 KB)
+const WS_MAX_FRAME_BYTES = 128 * 1024;
 
 class RealtimeSyncService {
   private clientId = getOrCreateClientId();
@@ -54,8 +59,8 @@ class RealtimeSyncService {
   private sse: EventSource | null = null;
   private broadcastChannel: BroadcastChannel | null = null;
   private isApplyingRemote = false;
-  private isBootstrapped = false;
   private bootstrapPromise: Promise<void> | null = null;
+  private isPulling = false;
 
   private lastRevision = 0;
   private activeDevices = 1;
@@ -63,10 +68,16 @@ class RealtimeSyncService {
   private status: SyncConnectionStatus = 'reconnecting';
 
   private pendingMutations = new Map<string, { value: string | null; updatedAt: string }>();
+  private unackedWsBatches = new Map<
+    string,
+    { batch: Array<{ key: string; value: string | null; updatedAt: string }>; timer: number }
+  >();
+  private inMemoryFallback = new Map<string, string>();
   private flushTimer: number | null = null;
   private reconnectTimer: number | null = null;
   private reconnectAttempts = 0;
   private heartbeatTimer: number | null = null;
+  private deltaPollTimer: number | null = null;
   private lastKnownValues = new Map<string, string | null>();
 
   private statusListeners = new Set<(snap: SyncStatusSnapshot) => void>();
@@ -80,7 +91,7 @@ class RealtimeSyncService {
       for (let i = 0; i < window.localStorage.length; i++) {
         const key = window.localStorage.key(i);
         if (key && isSyncedKey(key)) {
-          this.lastKnownValues.set(key, window.localStorage.getItem(key));
+          this.lastKnownValues.set(key, nativeGetItem.call(window.localStorage, key));
         }
       }
     } catch {
@@ -113,12 +124,34 @@ class RealtimeSyncService {
 
     const self = this;
 
+    Storage.prototype.getItem = function (key: string): string | null {
+      const val = nativeGetItem.call(this, key);
+      if (val === null && this === window.localStorage && self.inMemoryFallback.has(key)) {
+        return self.inMemoryFallback.get(key) ?? null;
+      }
+      return val;
+    };
+
     Storage.prototype.setItem = function (key: string, value: string) {
-      nativeSetItem.call(this, key, value);
+      const strVal = String(value);
+      let wroteToStorage = false;
+      try {
+        nativeSetItem.call(this, key, strVal);
+        wroteToStorage = true;
+        if (this === window.localStorage) {
+          self.inMemoryFallback.delete(key);
+        }
+      } catch (err) {
+        // QuotaExceededError fallback: tetap simpan di memori & sinkronkan ke server!
+        if (this === window.localStorage) {
+          self.inMemoryFallback.set(key, strVal);
+        }
+        console.warn(`[Sync] localStorage quota warning for ${key}, tetap menyinkronkan ke server:`, err);
+      }
+
       if (this === window.localStorage && !self.isApplyingRemote && isSyncedKey(key)) {
-        const strVal = String(value);
         const prevVal = self.lastKnownValues.get(key);
-        if (prevVal === strVal) return;
+        if (wroteToStorage && prevVal === strVal) return;
         self.lastKnownValues.set(key, strVal);
         self.enqueueMutation(key, strVal);
       }
@@ -126,6 +159,9 @@ class RealtimeSyncService {
 
     Storage.prototype.removeItem = function (key: string) {
       nativeRemoveItem.call(this, key);
+      if (this === window.localStorage) {
+        self.inMemoryFallback.delete(key);
+      }
       if (this === window.localStorage && !self.isApplyingRemote && isSyncedKey(key)) {
         const prevVal = self.lastKnownValues.get(key);
         if (prevVal === null || prevVal === undefined) return;
@@ -165,37 +201,9 @@ class RealtimeSyncService {
     }, 15);
   }
 
-  public async flushMutations(): Promise<void> {
-    if (this.pendingMutations.size === 0) return;
-
-    const batch: Array<{ key: string; value: string | null; updatedAt: string }> = [];
-    this.pendingMutations.forEach((entry, key) => {
-      batch.push({ key, value: entry.value, updatedAt: entry.updatedAt });
-    });
-    this.pendingMutations.clear();
-    this.status = 'syncing';
-    this.emitStatus();
-
-    // Try WebSocket first for lowest latency (<20ms)
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(
-          JSON.stringify({
-            type: 'sync:patch',
-            clientId: this.clientId,
-            mutations: batch,
-          })
-        );
-        this.lastSyncedAt = new Date().toISOString();
-        this.status = 'connected';
-        this.emitStatus();
-        return;
-      } catch (err) {
-        console.warn('[Sync] WebSocket send failed, falling back to HTTP batch:', err);
-      }
-    }
-
-    // Fallback to HTTP POST /api/sync/batch
+  private async sendBatchViaHttp(
+    batch: Array<{ key: string; value: string | null; updatedAt: string }>
+  ): Promise<void> {
     try {
       const res = await fetch('/api/sync/batch', {
         method: 'POST',
@@ -211,10 +219,10 @@ class RealtimeSyncService {
         this.lastRevision = Math.max(this.lastRevision, json.revision);
       }
       this.lastSyncedAt = new Date().toISOString();
-      this.status = this.ws?.readyState === WebSocket.OPEN ? 'connected' : 'reconnecting';
+      this.status = 'connected';
       this.emitStatus();
     } catch (err) {
-      // Re-queue failed batch if offline, preserving newer mutations already queued
+      // Re-queue failed batch for retry
       batch.forEach((m) => {
         if (!this.pendingMutations.has(m.key)) {
           this.pendingMutations.set(m.key, { value: m.value, updatedAt: m.updatedAt });
@@ -226,6 +234,52 @@ class RealtimeSyncService {
     }
   }
 
+  public async flushMutations(): Promise<void> {
+    if (this.pendingMutations.size === 0) return;
+
+    const batch: Array<{ key: string; value: string | null; updatedAt: string }> = [];
+    this.pendingMutations.forEach((entry, key) => {
+      batch.push({ key, value: entry.value, updatedAt: entry.updatedAt });
+    });
+    this.pendingMutations.clear();
+    this.status = 'syncing';
+    this.emitStatus();
+
+    const batchId = `b-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+    const wsPayload = JSON.stringify({
+      type: 'sync:patch',
+      batchId,
+      clientId: this.clientId,
+      mutations: batch,
+    });
+
+    // Untuk payload <= 128 KB gunakan WebSocket + ACK watchdog; payload besar langsung HTTP POST agar bebas limit frame proxy
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && wsPayload.length <= WS_MAX_FRAME_BYTES) {
+      try {
+        const timer = window.setTimeout(() => {
+          const pending = this.unackedWsBatches.get(batchId);
+          if (pending) {
+            this.unackedWsBatches.delete(batchId);
+            void this.sendBatchViaHttp(pending.batch);
+          }
+        }, 1500);
+
+        this.unackedWsBatches.set(batchId, { batch, timer });
+        this.ws.send(wsPayload);
+        return;
+      } catch (err) {
+        const pending = this.unackedWsBatches.get(batchId);
+        if (pending) {
+          window.clearTimeout(pending.timer);
+          this.unackedWsBatches.delete(batchId);
+        }
+        console.warn('[Sync] WebSocket send failed, using HTTP batch:', err);
+      }
+    }
+
+    await this.sendBatchViaHttp(batch);
+  }
+
   private flushBeaconOnUnload(): void {
     if (this.pendingMutations.size === 0) return;
     const batch: Array<{ key: string; value: string | null; updatedAt: string }> = [];
@@ -234,7 +288,7 @@ class RealtimeSyncService {
     });
     const payload = JSON.stringify({ clientId: this.clientId, mutations: batch });
     try {
-      if (navigator.sendBeacon) {
+      if (navigator.sendBeacon && payload.length < 60 * 1024) {
         const blob = new Blob([payload], { type: 'application/json' });
         navigator.sendBeacon('/api/sync/batch', blob);
       } else {
@@ -266,16 +320,23 @@ class RealtimeSyncService {
         if (this.pendingMutations.has(key)) continue;
 
         const remoteValue = entry?.value ?? null;
-        const currentLocal = window.localStorage.getItem(key);
+        const currentLocal = nativeGetItem.call(window.localStorage, key) ?? this.inMemoryFallback.get(key) ?? null;
 
         if (remoteValue === null) {
           if (currentLocal !== null) {
             nativeRemoveItem.call(window.localStorage, key);
+            this.inMemoryFallback.delete(key);
             this.lastKnownValues.set(key, null);
             changedKeys.push(key);
           }
         } else if (currentLocal !== remoteValue) {
-          nativeSetItem.call(window.localStorage, key, remoteValue);
+          try {
+            nativeSetItem.call(window.localStorage, key, remoteValue);
+            this.inMemoryFallback.delete(key);
+          } catch {
+            // Fallback ke memory jika kuota browser penuh oleh aset lama
+            this.inMemoryFallback.set(key, remoteValue);
+          }
           this.lastKnownValues.set(key, remoteValue);
           changedKeys.push(key);
         }
@@ -302,10 +363,13 @@ class RealtimeSyncService {
   }
 
   public async pullFromServer(sinceRevision = 0): Promise<void> {
+    if (this.isPulling) return;
+    this.isPulling = true;
+
     try {
       const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 2500);
-      const url = sinceRevision > 0 ? `/api/sync/state?since=${sinceRevision}` : '/api/sync/state';
+      const timeout = window.setTimeout(() => controller.abort(), 15000);
+      const url = sinceRevision > 0 ? `/api/sync/state?since=${sinceRevision}&_t=${Date.now()}` : `/api/sync/state?_t=${Date.now()}`;
       const res = await fetch(url, { cache: 'no-store', signal: controller.signal });
       window.clearTimeout(timeout);
 
@@ -322,17 +386,18 @@ class RealtimeSyncService {
       if (serverRevision > 0 || Object.keys(serverEntries).length > 0) {
         this.applyRemoteEntries(serverEntries, serverRevision);
       } else if (sinceRevision === 0) {
-        // Server belum terinisialisasi sama sekali -> kirim state lokal awal ke server sebagai baseline
         await this.seedServerWithInitialLocalState();
       }
 
       this.lastSyncedAt = new Date().toISOString();
-      if (this.ws?.readyState === WebSocket.OPEN) {
+      if (this.ws?.readyState === WebSocket.OPEN || navigator.onLine) {
         this.status = 'connected';
       }
       this.emitStatus();
     } catch (err) {
-      console.warn('[Sync] Pull failed:', err);
+      console.warn('[Sync] Pull skipped/retried:', err);
+    } finally {
+      this.isPulling = false;
     }
   }
 
@@ -343,7 +408,7 @@ class RealtimeSyncService {
       for (let i = 0; i < window.localStorage.length; i++) {
         const key = window.localStorage.key(i);
         if (key && isSyncedKey(key)) {
-          const val = window.localStorage.getItem(key);
+          const val = nativeGetItem.call(window.localStorage, key);
           if (val !== null) {
             mutations.push({ key, value: val, updatedAt: now });
           }
@@ -385,15 +450,12 @@ class RealtimeSyncService {
         this.status = 'connected';
         this.emitStatus();
 
-        // Flush queued mutations immediately upon connect/reconnect
         if (this.pendingMutations.size > 0) {
           void this.flushMutations();
         } else if (this.lastRevision > 0) {
-          // Pull missed deltas while disconnected
           ws.send(JSON.stringify({ type: 'sync:pull', since: this.lastRevision }));
         }
 
-        // Start heartbeat every 25s to keep proxy/mobile connections alive
         if (this.heartbeatTimer !== null) window.clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = window.setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
@@ -419,6 +481,11 @@ class RealtimeSyncService {
             if (msg.sourceClientId === this.clientId) return;
             this.applyRemoteEntries(msg.entries || {}, msg.revision);
           } else if (msg.type === 'sync:ack') {
+            if (msg.batchId && this.unackedWsBatches.has(msg.batchId)) {
+              const pending = this.unackedWsBatches.get(msg.batchId)!;
+              window.clearTimeout(pending.timer);
+              this.unackedWsBatches.delete(msg.batchId);
+            }
             if (typeof msg.revision === 'number') {
               this.lastRevision = Math.max(this.lastRevision, msg.revision);
             }
@@ -451,7 +518,7 @@ class RealtimeSyncService {
       };
 
       ws.onerror = () => {
-        // Closed handler handles reconnect cleanly
+        // Handled cleanly in onclose
       };
     } catch {
       this.scheduleReconnect();
@@ -466,11 +533,13 @@ class RealtimeSyncService {
       sse.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          // Only process SSE if WebSocket is not actively open to prevent double work
           if (this.ws?.readyState === WebSocket.OPEN) return;
           if (msg.type === 'sync:delta' && msg.sourceClientId !== this.clientId) {
             this.applyRemoteEntries(msg.entries || {}, msg.revision);
-          } else if ((msg.type === 'sync:file:upsert' || msg.type === 'sync:file:delete') && msg.sourceClientId !== this.clientId) {
+          } else if (
+            (msg.type === 'sync:file:upsert' || msg.type === 'sync:file:delete') &&
+            msg.sourceClientId !== this.clientId
+          ) {
             window.dispatchEvent(new CustomEvent('simpel:remote-file-sync', { detail: msg }));
           }
         } catch {
@@ -480,6 +549,27 @@ class RealtimeSyncService {
     } catch {
       // ignore
     }
+  }
+
+  private startAdaptiveDeltaCheck(): void {
+    if (this.deltaPollTimer !== null) return;
+
+    const tick = async () => {
+      if (document.visibilityState === 'visible' && navigator.onLine) {
+        if (this.pendingMutations.size > 0) {
+          await this.flushMutations();
+        }
+        await this.pullFromServer(this.lastRevision);
+      }
+      const nextInterval = this.ws?.readyState === WebSocket.OPEN ? 5000 : 2500;
+      this.deltaPollTimer = window.setTimeout(() => {
+        void tick();
+      }, nextInterval);
+    };
+
+    this.deltaPollTimer = window.setTimeout(() => {
+      void tick();
+    }, 3000);
   }
 
   private scheduleReconnect(): void {
@@ -516,16 +606,17 @@ class RealtimeSyncService {
     this.bootstrapPromise = (async () => {
       if (typeof window === 'undefined') return;
 
-      // 1. Pull authoritative server state first (bounded timeout 2.5s so offline never hangs UI)
+      // 1. Pull authoritative server state first (does not abort prematurely on large payloads)
       await this.pullFromServer(0);
 
       // 2. Snapshot synced baseline & install transparent localStorage interceptor
       this.snapshotLocalValues();
       this.installStorageInterceptor();
 
-      // 3. Establish WebSocket + SSE fallback + browser lifecycle hooks
+      // 3. Establish WebSocket + SSE fallback + adaptive delta check + lifecycle hooks
       this.connectWebSocket();
       this.setupSSEFallback();
+      this.startAdaptiveDeltaCheck();
       this.initSupabaseRealtimeBridge();
 
       window.addEventListener('online', () => {
@@ -552,8 +643,6 @@ class RealtimeSyncService {
 
       window.addEventListener('pagehide', () => this.flushBeaconOnUnload());
       window.addEventListener('beforeunload', () => this.flushBeaconOnUnload());
-
-      this.isBootstrapped = true;
     })();
 
     return this.bootstrapPromise;
@@ -566,7 +655,7 @@ class RealtimeSyncService {
     await this.pullFromServer(0);
     window.dispatchEvent(new CustomEvent('simpel:remote-sync', { detail: { keys: ['*'], manual: true } }));
     window.dispatchEvent(new CustomEvent('simpel:remote-file-sync', { detail: { manual: true } }));
-    this.status = this.ws?.readyState === WebSocket.OPEN ? 'connected' : 'reconnecting';
+    this.status = this.ws?.readyState === WebSocket.OPEN || navigator.onLine ? 'connected' : 'reconnecting';
     this.emitStatus();
   }
 

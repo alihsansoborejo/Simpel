@@ -93,7 +93,7 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileNav, onNavigate, a
               setTimeout(() => setIsManualSyncing(false), 400);
             }
           }}
-          className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer ${
+          className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer ${
             syncStatus === 'connected' || isSupabaseConfigured
               ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
               : syncStatus === 'offline'

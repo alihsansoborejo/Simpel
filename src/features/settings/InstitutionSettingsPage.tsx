@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAppSettings } from '../../context/AppSettingsContext';
+import { syncService } from '../../services/syncService';
 import {
   School,
   Save,
@@ -53,24 +54,69 @@ export const InstitutionSettingsPage: React.FC = () => {
     if (settings.favicon_url) setCustomFavicon(settings.favicon_url);
   }, [settings]);
 
+  const optimizeImageDataUrl = (dataUri: string, maxDim: number): Promise<string> => {
+    return new Promise((resolve) => {
+      if (!dataUri.startsWith('data:image/') || dataUri.startsWith('data:image/svg+xml')) {
+        resolve(dataUri);
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        const { width, height } = img;
+        if (width <= maxDim && height <= maxDim && dataUri.length <= 120_000) {
+          resolve(dataUri);
+          return;
+        }
+        const scale = Math.min(1, maxDim / Math.max(width, height));
+        const targetW = Math.max(1, Math.round(width * scale));
+        const targetH = Math.max(1, Math.round(height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(dataUri);
+          return;
+        }
+        ctx.clearRect(0, 0, targetW, targetH);
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        try {
+          const webp = canvas.toDataURL('image/webp', 0.88);
+          if (webp.startsWith('data:image/webp') && webp.length < dataUri.length) {
+            resolve(webp);
+            return;
+          }
+          const png = canvas.toDataURL('image/png');
+          resolve(png.length < dataUri.length ? png : dataUri);
+        } catch {
+          resolve(dataUri);
+        }
+      };
+      img.onerror = () => resolve(dataUri);
+      img.src = dataUri;
+    });
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'logo' | 'favicon') => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 2 * 1024 * 1024) {
-      setErrorMessage('Ukuran berkas gambar maksimal 2 MB.');
+    if (file.size > 5 * 1024 * 1024) {
+      setErrorMessage('Ukuran berkas gambar maksimal 5 MB.');
       return;
     }
 
     const reader = new FileReader();
-    reader.onload = (uploadEvent) => {
-      const dataUri = uploadEvent.target?.result as string;
+    reader.onload = async (uploadEvent) => {
+      const rawUri = uploadEvent.target?.result as string;
+      const optimized = await optimizeImageDataUrl(rawUri, type === 'logo' ? 320 : 96);
       if (type === 'logo') {
-        setCustomLogo(dataUri);
+        setCustomLogo(optimized);
       } else {
-        setCustomFavicon(dataUri);
+        setCustomFavicon(optimized);
       }
-      setStatusMessage(`Pratinjau ${type === 'logo' ? 'Logo' : 'Favicon'} diperbarui. Klik Simpan untuk menerapkan.`);
+      setErrorMessage(null);
+      setStatusMessage(`Pratinjau ${type === 'logo' ? 'Logo' : 'Favicon'} diperbarui & dioptimalkan. Klik Simpan untuk menerapkan ke semua perangkat.`);
     };
     reader.readAsDataURL(file);
   };
@@ -82,6 +128,14 @@ export const InstitutionSettingsPage: React.FC = () => {
     setErrorMessage(null);
 
     try {
+      const [finalLogo, finalFavicon] = await Promise.all([
+        customLogo.length > 150_000 ? optimizeImageDataUrl(customLogo, 320) : Promise.resolve(customLogo),
+        customFavicon.length > 100_000 ? optimizeImageDataUrl(customFavicon, 96) : Promise.resolve(customFavicon),
+      ]);
+
+      setCustomLogo(finalLogo);
+      setCustomFavicon(finalFavicon);
+
       await updateSettings({
         school_name: schoolName,
         address,
@@ -90,13 +144,13 @@ export const InstitutionSettingsPage: React.FC = () => {
         nsm,
         npsn,
         kktp_default: Number(kktpDefault),
-        logo_url: customLogo,
-        favicon_url: customFavicon,
+        logo_url: finalLogo,
+        favicon_url: finalFavicon,
       });
 
-      await setLogoAndFavicon(customLogo, customFavicon);
+      await syncService.flushMutations();
 
-      setStatusMessage('Profil Identitas Madrasah berhasil diperbarui dan diterapkan ke seluruh sistem!');
+      setStatusMessage('Profil Identitas & Logo Madrasah berhasil disimpan dan disinkronkan ke semua perangkat!');
       setTimeout(() => setStatusMessage(null), 4000);
     } catch (err: any) {
       setErrorMessage(err.message || 'Gagal menyimpan konfigurasi identitas.');

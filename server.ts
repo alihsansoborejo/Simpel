@@ -268,6 +268,8 @@ function applySyncMutations(
 
 // REST Endpoints untuk Sinkronisasi Cepat Antarperangkat
 app.get('/api/sync/state', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
   const since = Number(req.query.since || 0);
   if (since > 0) {
     const deltaEntries: Record<string, SyncEntry> = {};
@@ -333,6 +335,8 @@ app.get('/api/sync/stream', (req: Request, res: Response) => {
 
 // Synced Uploaded Files Endpoints
 app.get('/api/sync/files', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
   res.json({
     revision: syncFilesState.revision,
     files: syncFilesState.files,
@@ -1759,7 +1763,11 @@ async function startServer() {
   const httpServer = http.createServer(app);
   const isProd = process.env.NODE_ENV === 'production';
 
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws/sync' });
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: '/ws/sync',
+    maxPayload: 25 * 1024 * 1024,
+  });
 
   wss.on('connection', (ws, req) => {
     const reqUrl = new URL(req.url || '/ws/sync', `http://localhost:${PORT}`);
@@ -1826,6 +1834,7 @@ async function startServer() {
           ws.send(
             JSON.stringify({
               type: 'sync:ack',
+              batchId: msg.batchId || null,
               revision: result.revision,
               keys: result.appliedKeys,
             })
