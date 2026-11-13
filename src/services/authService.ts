@@ -6,9 +6,15 @@ import { getDemoUsers } from './userService';
 import { academicService } from './academicService';
 
 const LOCAL_SESSION_KEY = 'simpel_mi_session_user';
+let lastSupabaseAuthError: string | null = null;
+
+export function getLastSupabaseAuthError(): string | null {
+  return lastSupabaseAuthError;
+}
 
 export async function loginWithEmail(email: string, password?: string): Promise<AuthUser> {
   const normalizedInput = email.trim().toLowerCase();
+  lastSupabaseAuthError = null;
 
   // Cari dari daftar seluruh akun yang dibuat atau master
   const dynamicUsers = getDemoUsers();
@@ -25,18 +31,44 @@ export async function loginWithEmail(email: string, password?: string): Promise<
     (normalizedInput === 'alihsansoborejo@gmail.com' ? DEMO_USERS[0] : undefined);
 
   if (isSupabaseConfigured) {
+    let authData: { user: any } | null = null;
+    let authError: { message: string } | null = null;
+
     try {
-      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      const res = await supabase.auth.signInWithPassword({
         email: normalizedInput,
         password: password || '',
       });
+      authData = res.data;
+      authError = res.error;
+    } catch (networkErr: any) {
+      lastSupabaseAuthError = networkErr?.message || 'Gagal menghubungi Supabase Auth.';
+      console.warn('Supabase Auth network error, checking local fallback:', networkErr);
+    }
 
-      if (!authError && authData?.user) {
-        const userId = authData.user.id;
-        return await fetchFullUserAccount(userId, normalizedInput);
+    if (authError) {
+      lastSupabaseAuthError = authError.message;
+      const msgLower = authError.message.toLowerCase();
+      if (msgLower.includes('email not confirmed')) {
+        throw new Error(
+          'Email belum dikonfirmasi di Supabase Auth. Buka Supabase → Authentication → Users, klik user alihsansoborejo@gmail.com lalu konfirmasi email (atau buat ulang dengan Auto Confirm User dicentang).'
+        );
       }
-    } catch (supaErr) {
-      console.warn('Supabase Auth error, checking dynamic user accounts:', supaErr);
+      if (msgLower.includes('invalid login credentials')) {
+        throw new Error(
+          'Email atau kata sandi belum cocok di Supabase Auth. Pastikan user sudah dibuat di Supabase → Authentication → Users (centang Auto Confirm User) dan gunakan kata sandi yang sama.'
+        );
+      }
+      throw new Error(`Login Supabase gagal: ${authError.message}`);
+    }
+
+    if (authData?.user) {
+      try {
+        return await fetchFullUserAccount(authData.user.id, normalizedInput);
+      } catch (accountErr: any) {
+        lastSupabaseAuthError = accountErr?.message || 'Profil atau role belum tersedia.';
+        throw accountErr;
+      }
     }
   }
 
@@ -110,6 +142,7 @@ export async function loginWithEmail(email: string, password?: string): Promise<
 }
 
 export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok' = 'admin'): Promise<AuthUser> {
+  lastSupabaseAuthError = null;
   const dynamicUsers = getDemoUsers();
   let matchedUser = dynamicUsers.find((u) => {
     if (target === 'admin') return u.roles.includes('admin');
@@ -124,21 +157,41 @@ export async function loginDirectlyAs(target: 'admin' | 'kamad' | 'guru' | 'pjok
   }
 
   if (isSupabaseConfigured && matchedUser?.email) {
+    const candidatePassword =
+      ('password' in matchedUser && (matchedUser as any).password) || 'AlIhsan2026!';
+    let authData: { user: any } | null = null;
+    let authError: { message: string } | null = null;
+
     try {
-      const candidatePassword =
-        ('password' in matchedUser && (matchedUser as any).password) || 'AlIhsan2026!';
-      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      const res = await supabase.auth.signInWithPassword({
         email: matchedUser.email.toLowerCase(),
         password: candidatePassword,
       });
-      if (!authError && authData?.user) {
-        return await fetchFullUserAccount(authData.user.id, matchedUser.email.toLowerCase());
+      authData = res.data;
+      authError = res.error;
+    } catch (networkErr: any) {
+      lastSupabaseAuthError = networkErr?.message || 'Gagal menghubungi Supabase Auth.';
+      console.warn('Supabase Auth network error on quick login:', networkErr);
+    }
+
+    if (authError) {
+      lastSupabaseAuthError = authError.message;
+      const msgLower = authError.message.toLowerCase();
+      if (msgLower.includes('email not confirmed')) {
+        throw new Error(
+          'Email alihsansoborejo@gmail.com di Supabase Auth belum terkonfirmasi. Centang "Auto Confirm User" saat membuat user di Supabase Auth → Users.'
+        );
       }
-      if (authError) {
-        console.warn('Supabase Auth sign-in skipped on quick login:', authError.message);
+      if (msgLower.includes('invalid login credentials')) {
+        throw new Error(
+          'Login cepat memakai sandi standar (AlIhsan2026!), namun di Supabase Auth akun belum dibuat atau memakai sandi berbeda. Silakan login lewat formulir Email & Sandi di atas.'
+        );
       }
-    } catch (supaErr) {
-      console.warn('Supabase Auth quick login fallback:', supaErr);
+      throw new Error(`Autentikasi Supabase gagal: ${authError.message}`);
+    }
+
+    if (authData?.user) {
+      return await fetchFullUserAccount(authData.user.id, matchedUser.email.toLowerCase());
     }
   }
 
@@ -186,7 +239,9 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
     .single();
 
   if (profileError || !profileData) {
-    throw new Error('Profil pengguna tidak ditemukan dalam database madrasah.');
+    throw new Error(
+      'Profil pengguna belum ada di tabel public.profiles. Pastikan skrip SQL migrasi terbaru sudah dijalankan di Supabase SQL Editor.'
+    );
   }
 
   const profile: Profile = profileData;
@@ -202,7 +257,9 @@ export async function fetchFullUserAccount(userId: string, emailFallback?: strin
     .eq('user_id', userId);
 
   if (rolesError || !rolesData || rolesData.length === 0) {
-    throw new Error('Akun Anda belum memiliki penugasan peran (Role). Hubungi admin madrasah.');
+    throw new Error(
+      'Akun Supabase Auth berhasil masuk, tetapi peran (role) di tabel public.user_roles masih kosong. Salin & jalankan ulang Skrip SQL Lengkap terbaru di Supabase SQL Editor.'
+    );
   }
 
   const roles: UserRole[] = rolesData.map((r: { role: UserRole }) => r.role);

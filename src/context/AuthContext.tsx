@@ -68,6 +68,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       } catch (err: any) {
         console.warn('Session init warning:', err?.message);
+        if (mounted && err?.message) {
+          setError(err.message);
+        }
       } finally {
         if (mounted) setIsLoading(false);
       }

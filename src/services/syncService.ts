@@ -138,18 +138,56 @@ class RealtimeSyncService {
     Storage.prototype.setItem = function (key: string, value: string) {
       const strVal = String(value);
       let wroteToStorage = false;
-      try {
-        nativeSetItem.call(this, key, strVal);
-        wroteToStorage = true;
-        if (this === window.localStorage) {
-          self.inMemoryFallback.delete(key);
+      const shouldKeepMemoryOnly =
+        this === window.localStorage && isSyncedKey(key) && strVal.length > 500_000;
+
+      if (shouldKeepMemoryOnly) {
+        self.inMemoryFallback.set(key, strVal);
+        try {
+          nativeRemoveItem.call(window.localStorage, key);
+        } catch {
+          // ignore
         }
-      } catch (err) {
-        // QuotaExceededError fallback: tetap simpan di memori & sinkronkan ke server!
-        if (this === window.localStorage) {
-          self.inMemoryFallback.set(key, strVal);
+      } else {
+        try {
+          nativeSetItem.call(this, key, strVal);
+          wroteToStorage = true;
+          if (this === window.localStorage) {
+            self.inMemoryFallback.delete(key);
+          }
+        } catch (err) {
+          // Jika auth token / non-synced key gagal karena quota penuh oleh cache simpel_*, bebaskan ruang lalu coba ulang
+          if (this === window.localStorage && !isSyncedKey(key)) {
+            let freed = false;
+            for (let i = window.localStorage.length - 1; i >= 0; i--) {
+              const existingKey = window.localStorage.key(i);
+              if (existingKey && isSyncedKey(existingKey)) {
+                const existingVal = nativeGetItem.call(window.localStorage, existingKey);
+                if (existingVal && existingVal.length > 50_000) {
+                  self.inMemoryFallback.set(existingKey, existingVal);
+                  nativeRemoveItem.call(window.localStorage, existingKey);
+                  freed = true;
+                }
+              }
+            }
+            if (freed) {
+              try {
+                nativeSetItem.call(this, key, strVal);
+                wroteToStorage = true;
+                self.inMemoryFallback.delete(key);
+              } catch {
+                self.inMemoryFallback.set(key, strVal);
+              }
+            } else {
+              self.inMemoryFallback.set(key, strVal);
+            }
+          } else if (this === window.localStorage) {
+            self.inMemoryFallback.set(key, strVal);
+          }
+          if (!wroteToStorage) {
+            console.warn(`[Sync] localStorage quota warning for ${key}, menggunakan fallback memori:`, err);
+          }
         }
-        console.warn(`[Sync] localStorage quota warning for ${key}, tetap menyinkronkan ke server:`, err);
       }
 
       if (this === window.localStorage && !self.isApplyingRemote && isSyncedKey(key)) {
@@ -334,12 +372,21 @@ class RealtimeSyncService {
             changedKeys.push(key);
           }
         } else if (currentLocal !== remoteValue) {
-          try {
-            nativeSetItem.call(window.localStorage, key, remoteValue);
-            this.inMemoryFallback.delete(key);
-          } catch {
-            // Fallback ke memory jika kuota browser penuh oleh aset lama
+          if (remoteValue.length > 500_000) {
             this.inMemoryFallback.set(key, remoteValue);
+            try {
+              nativeRemoveItem.call(window.localStorage, key);
+            } catch {
+              // ignore
+            }
+          } else {
+            try {
+              nativeSetItem.call(window.localStorage, key, remoteValue);
+              this.inMemoryFallback.delete(key);
+            } catch {
+              // Fallback ke memory jika kuota browser penuh oleh aset lama
+              this.inMemoryFallback.set(key, remoteValue);
+            }
           }
           this.lastKnownValues.set(key, remoteValue);
           changedKeys.push(key);

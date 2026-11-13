@@ -2,10 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { academicService } from '../../services/academicService';
 import { AcademicYear, Semester, SystemSettings } from '../../types/database.types';
 import { isSupabaseConfigured, supabase, getSupabaseConfigStatus } from '../../lib/supabaseClient';
-import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School, Copy, Download, ExternalLink, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Save, Plus, CheckCircle, Calendar, ShieldCheck, Database, School, Copy, Download, ExternalLink, CheckCircle2, AlertTriangle, RefreshCw, LogOut, KeyRound } from 'lucide-react';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync';
+import { useAuth } from '../../context/AuthContext';
 
 export const AcademicSettingsPage: React.FC = () => {
+  const { logout, login } = useAuth();
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
   const [semesters, setSemesters] = useState<Semester[]>([]);
@@ -19,6 +21,10 @@ export const AcademicSettingsPage: React.FC = () => {
   const [newYearStart, setNewYearStart] = useState<string>('2027-07-15');
   const [newYearEnd, setNewYearEnd] = useState<string>('2028-06-25');
   const [isCopied, setIsCopied] = useState<boolean>(false);
+  const [supaAuthEmail, setSupaAuthEmail] = useState<string>('alihsansoborejo@gmail.com');
+  const [supaAuthPassword, setSupaAuthPassword] = useState<string>('AlIhsan2026!');
+  const [supaAuthLoading, setSupaAuthLoading] = useState<boolean>(false);
+  const [supaAuthError, setSupaAuthError] = useState<string | null>(null);
   const [dbCheckState, setDbCheckState] = useState<{
     checking: boolean;
     reachable: boolean;
@@ -506,11 +512,65 @@ export const AcademicSettingsPage: React.FC = () => {
                   </span>
                 </div>
               ) : !dbCheckState.hasAuthSession ? (
-                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-400/30 text-[11px] text-amber-200 leading-relaxed flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  <span>
-                    Env Supabase aktif, namun sesi saat ini belum memiliki token Auth Supabase. Pastikan user <code className="text-white">alihsansoborejo@gmail.com</code> sudah dibuat di <strong>Supabase Auth → Users</strong> lalu keluar (Logout) dan login ulang.
-                  </span>
+                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-400/30 text-[11px] text-amber-200 leading-relaxed space-y-2.5">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <span>
+                      Env Supabase aktif, namun sesi saat ini masih memakai sesi lokal (belum ada token Auth Supabase). Masukkan email &amp; sandi user yang sudah Anda buat di <strong>Supabase Auth → Users</strong>:
+                    </span>
+                  </div>
+
+                  <div className="space-y-1.5 bg-black/25 p-2 rounded-lg border border-white/10">
+                    <input
+                      type="email"
+                      value={supaAuthEmail}
+                      onChange={(e) => setSupaAuthEmail(e.target.value)}
+                      placeholder="Email Supabase Auth"
+                      className="w-full px-2.5 py-1.5 rounded bg-slate-900/90 border border-white/15 text-[11px] text-white placeholder:text-slate-400 focus:outline-none focus:border-amber-400"
+                    />
+                    <input
+                      type="password"
+                      value={supaAuthPassword}
+                      onChange={(e) => setSupaAuthPassword(e.target.value)}
+                      placeholder="Kata sandi user Supabase Auth"
+                      className="w-full px-2.5 py-1.5 rounded bg-slate-900/90 border border-white/15 text-[11px] text-white placeholder:text-slate-400 focus:outline-none focus:border-amber-400"
+                    />
+                    {supaAuthError && (
+                      <p className="text-[10px] text-rose-300 bg-rose-950/60 border border-rose-500/40 rounded p-1.5 leading-snug">
+                        {supaAuthError}
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      disabled={supaAuthLoading}
+                      onClick={async () => {
+                        setSupaAuthLoading(true);
+                        setSupaAuthError(null);
+                        try {
+                          await login(supaAuthEmail, supaAuthPassword);
+                          await checkSupabaseConnection();
+                          setStatusMessage('Sesi Auth Supabase berhasil terhubung!');
+                        } catch (err: any) {
+                          setSupaAuthError(err?.message || 'Gagal masuk ke Supabase Auth.');
+                        } finally {
+                          setSupaAuthLoading(false);
+                        }
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-bold transition-colors disabled:opacity-50"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>{supaAuthLoading ? 'Menghubungkan...' : 'Hubungkan Sesi Auth Supabase'}</span>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => void logout()}
+                    className="w-full flex items-center justify-center gap-1.5 py-1 px-2 rounded-lg bg-white/10 hover:bg-white/20 text-slate-200 text-[10px] font-semibold transition-colors"
+                  >
+                    <LogOut className="w-3 h-3" />
+                    <span>Atau Logout ke Halaman Login</span>
+                  </button>
                 </div>
               ) : dbCheckState.errorMessage ? (
                 <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-400/30 text-[11px] text-amber-200 leading-relaxed">
