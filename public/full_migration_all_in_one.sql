@@ -716,6 +716,9 @@ END $$;
 
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
+DECLARE
+    role_val text;
+    idx int := 0;
 BEGIN
     INSERT INTO public.profiles (id, email, full_name, avatar_url, is_active)
     VALUES (
@@ -729,6 +732,27 @@ BEGIN
     SET email = EXCLUDED.email,
         full_name = EXCLUDED.full_name;
 
+    IF lower(NEW.email) = 'alihsansoborejo@gmail.com' THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (NEW.id, 'admin', TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    ELSIF jsonb_typeof(NEW.raw_user_meta_data->'roles') = 'array' THEN
+        FOR role_val IN SELECT jsonb_array_elements_text(NEW.raw_user_meta_data->'roles') LOOP
+            IF role_val IN ('guru', 'wali_kelas', 'kepala_madrasah') THEN
+                INSERT INTO public.user_roles (user_id, role, is_primary)
+                VALUES (NEW.id, role_val::user_role_type, idx = 0)
+                ON CONFLICT (user_id, role) DO NOTHING;
+                idx := idx + 1;
+            END IF;
+        END LOOP;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = NEW.id) THEN
+        INSERT INTO public.user_roles (user_id, role, is_primary)
+        VALUES (NEW.id, 'guru', TRUE)
+        ON CONFLICT (user_id, role) DO NOTHING;
+    END IF;
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -737,6 +761,25 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
 AFTER INSERT ON auth.users
 FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Sinkronisasi akun auth.users yang sudah telanjur dibuat sebelum skrip SQL dijalankan
+INSERT INTO public.profiles (id, email, full_name, avatar_url, is_active)
+SELECT
+    au.id,
+    au.email,
+    COALESCE(au.raw_user_meta_data->>'full_name', split_part(au.email, '@', 1)),
+    au.raw_user_meta_data->>'avatar_url',
+    TRUE
+FROM auth.users au
+WHERE au.email IS NOT NULL
+ON CONFLICT (id) DO UPDATE
+SET email = EXCLUDED.email;
+
+INSERT INTO public.user_roles (user_id, role, is_primary)
+SELECT au.id, 'admin'::user_role_type, TRUE
+FROM auth.users au
+WHERE lower(au.email) = 'alihsansoborejo@gmail.com'
+ON CONFLICT (user_id, role) DO NOTHING;
 
 -- HELPER FUNCTIONS FOR RLS
 CREATE OR REPLACE FUNCTION public.has_role(target_role user_role_type)
@@ -1466,3 +1509,31 @@ VALUES
     ('f2000000-0000-0000-0000-000000000401', 'f1000000-0000-0000-0000-000000000004', '4.1', 'Keterlibatan Aktif Seluruh Murid', 'Semua anak berpartisipasi setara tanpa diskriminasi', 1, 4.00),
     ('f2000000-0000-0000-0000-000000000501', 'f1000000-0000-0000-0000-000000000005', '5.1', 'Pemberian Umpan Balik Positif Konstruktif', 'Guru mengapresiasi usaha dan memberikan arahan perbaikan', 1, 4.00)
 ON CONFLICT DO NOTHING;
+
+-- ==========================================
+-- BAGIAN 7: AKTIFKAN SUPABASE REALTIME REPLICATION
+-- ==========================================
+DO $$
+DECLARE
+    tbl text;
+    rt_tables text[] := ARRAY[
+        'system_settings', 'academic_years', 'semesters', 'classes', 'subjects',
+        'teachers', 'students', 'class_members', 'teaching_assignments', 'homeroom_assignments',
+        'schedules', 'teaching_journals', 'student_attendance', 'assessments', 'grades',
+        'final_grades', 'report_cards', 'document_links', 'supervision_records',
+        'student_guidance_records', 'notifications'
+    ];
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+        FOREACH tbl IN ARRAY rt_tables LOOP
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_publication_tables
+                WHERE pubname = 'supabase_realtime'
+                  AND schemaname = 'public'
+                  AND tablename = tbl
+            ) THEN
+                EXECUTE format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I;', tbl);
+            END IF;
+        END LOOP;
+    END IF;
+END $$;
