@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="favEmerald" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#064e3b" />
+    </linearGradient>
+    <linearGradient id="favGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fde047" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+  </defs>
+  <!-- Rounded Base Shield -->
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#favEmerald)" stroke="url(#favGold)" stroke-width="2.5" />
+  
+  <!-- Central Star -->
+  <polygon points="32,10 35,18 43,18 37,23 39,31 32,26 25,31 27,23 21,18 29,18" fill="url(#favGold)" />
+  
+  <!-- Open Book of Knowledge -->
+  <path d="M16,35 C23,31 30,32 32,36 C34,32 41,31 48,35 C46,47 34,46 32,50 C30,46 18,47 16,35 Z" fill="#ffffff" stroke="url(#favGold)" stroke-width="1.5" />
+  <path d="M32,36 L32,50" stroke="#059669" stroke-width="1.5" />
+</svg>

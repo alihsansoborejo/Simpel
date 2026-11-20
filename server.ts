@@ -1,0 +1,2633 @@
+import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+import { GoogleGenAI } from '@google/genai';
+import { WebSocketServer, WebSocket } from 'ws';
+import zlib from 'zlib';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const app = express();
+const PORT = 3000;
+const DEFAULT_GEMINI_MODEL = 'gemini-4-hydrogen';
+const DEPRECATED_OR_INVALID_MODELS = new Set([
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+  'gemini-pro',
+  'gemini-2.0-flash',
+  'gemini-2.0-pro',
+  'gemini-2.0-flash-thinking',
+  'gemini-3.8-flash',
+]);
+
+function resolveGeminiModel(rawModel?: string): string {
+  const candidate = String(rawModel || '').trim().replace(/^models\//i, '');
+  if (!candidate) return DEFAULT_GEMINI_MODEL;
+  // Tolak nilai non-model (mis. token/API key yang tidak sengaja masuk ke GEMINI_MODEL)
+  if (!/^gemini-[a-z0-9.-]+$/i.test(candidate)) {
+    console.warn('[AI Studio] Ignoring invalid GEMINI_MODEL value; using default:', DEFAULT_GEMINI_MODEL);
+    return DEFAULT_GEMINI_MODEL;
+  }
+  if (DEPRECATED_OR_INVALID_MODELS.has(candidate.toLowerCase())) {
+    console.warn(`[AI Studio] Ignoring unsupported model "${candidate}"; using default:`, DEFAULT_GEMINI_MODEL);
+    return DEFAULT_GEMINI_MODEL;
+  }
+  return candidate;
+}
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = resolveGeminiModel(process.env.GEMINI_MODEL);
+
+// Inisialisasi Google GenAI SDK (Modern @google/genai)
+let ai: GoogleGenAI | null = null;
+if (GEMINI_API_KEY) {
+  try {
+    ai = new GoogleGenAI({
+      apiKey: GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+    console.log(`[AI Studio] Google GenAI initialized with model: ${GEMINI_MODEL}`);
+  } catch (err) {
+    console.warn('[AI Studio] Warning initializing GoogleGenAI:', err);
+  }
+} else {
+  console.log('[AI Studio] GEMINI_API_KEY not configured. Running with pedagogical template engine fallback.');
+}
+
+function formatGeminiError(err: any): { status: number; message: string; code: string } {
+  const rawMsg = String(err?.message || err || 'Kesalahan pada layanan Gemini AI');
+  const status = Number(err?.status || err?.statusCode || 0);
+  const lower = rawMsg.toLowerCase();
+
+  if (status === 403 || lower.includes('permission_denied') || lower.includes('api_key_invalid') || (status === 400 && lower.includes('api key'))) {
+    return {
+      status: 403,
+      code: 'API_KEY_INVALID',
+      message: 'API key Gemini tidak valid atau belum memiliki izin. Silakan periksa GEMINI_API_KEY di menu Settings > Secrets.',
+    };
+  }
+  if (status === 429 || lower.includes('resource_exhausted') || lower.includes('quota')) {
+    return {
+      status: 429,
+      code: 'RESOURCE_EXHAUSTED',
+      message: 'Kuota permintaan Gemini API sedang penuh (rate limit). Silakan tunggu sebentar dan coba kembali.',
+    };
+  }
+  if (status === 404 || lower.includes('not_found')) {
+    return {
+      status: 404,
+      code: 'MODEL_NOT_FOUND',
+      message: `Model AI "${GEMINI_MODEL}" tidak tersedia (${rawMsg}).`,
+    };
+  }
+  return {
+    status: status >= 400 && status < 600 ? status : 502,
+    code: 'GEMINI_ERROR',
+    message: `Layanan AI Gemini gagal merespons: ${rawMsg}`,
+  };
+}
+
+async function generateGeminiText(params: {
+  contents: any;
+  systemInstruction?: string;
+  responseMimeType?: string;
+}): Promise<{ text: string; modelUsed: string }> {
+  if (!ai) {
+    throw Object.assign(new Error('GEMINI_API_KEY belum dikonfigurasi pada server.'), { status: 503 });
+  }
+  const config: Record<string, any> = {};
+  if (params.systemInstruction) config.systemInstruction = params.systemInstruction;
+  if (params.responseMimeType) config.responseMimeType = params.responseMimeType;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: params.contents,
+      config,
+    });
+    return { text: response?.text || '', modelUsed: GEMINI_MODEL };
+  } catch (err: any) {
+    // Jika model kustom 404, coba otomatis ke gemini-4-hydrogen
+    const lower = String(err?.message || '').toLowerCase();
+    if (GEMINI_MODEL !== DEFAULT_GEMINI_MODEL && (err?.status === 404 || lower.includes('not_found'))) {
+      const retryRes = await ai.models.generateContent({
+        model: DEFAULT_GEMINI_MODEL,
+        contents: params.contents,
+        config,
+      });
+      return { text: retryRes?.text || '', modelUsed: DEFAULT_GEMINI_MODEL };
+    }
+    throw err;
+  }
+}
+
+app.use(express.json({ limit: '50mb' }));
+
+// ==========================================
+// REAL-TIME CROSS-DEVICE SYNC ENGINE
+// ==========================================
+const DATA_DIR = path.resolve(__dirname, '.data');
+const SYNC_STATE_FILE = path.join(DATA_DIR, 'simpel-sync-state.json');
+const SYNC_FILES_FILE = path.join(DATA_DIR, 'simpel-sync-files.json');
+const DRIVE_CONFIG_FILE = path.join(DATA_DIR, 'drive-config.json');
+
+const LOCAL_ONLY_KEYS = new Set([
+  'simpel_mi_session_user',
+  'simpel_data_purged_sole_admin_v4',
+]);
+
+interface SyncEntry {
+  value: string | null;
+  updatedAt: string;
+  revision: number;
+}
+
+interface SyncStoreState {
+  revision: number;
+  entries: Record<string, SyncEntry>;
+}
+
+interface SyncedFileRecord {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  category: string;
+  description?: string;
+  uploadedBy: string;
+  uploadedAt: string;
+  dataUrl?: string;
+  googleDriveUrl?: string;
+  driveFileId?: string;
+  folderPath?: string;
+  folderUrl?: string;
+  uploadedViaAppsScript?: boolean;
+  driveUploadError?: string;
+}
+
+interface SyncFilesState {
+  revision: number;
+  files: SyncedFileRecord[];
+  deletedIds: string[];
+}
+
+function ensureDataDir(): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+}
+
+function loadSyncStateFromDisk(): SyncStoreState {
+  try {
+    ensureDataDir();
+    if (fs.existsSync(SYNC_STATE_FILE)) {
+      const raw = fs.readFileSync(SYNC_STATE_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.revision === 'number' && parsed.entries) {
+        return parsed as SyncStoreState;
+      }
+    }
+  } catch (err) {
+    console.warn('[Sync] Failed reading state file, starting fresh:', err);
+  }
+  return { revision: 0, entries: {} };
+}
+
+function loadSyncFilesFromDisk(): SyncFilesState {
+  try {
+    ensureDataDir();
+    if (fs.existsSync(SYNC_FILES_FILE)) {
+      const raw = fs.readFileSync(SYNC_FILES_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.files)) {
+        return {
+          revision: parsed.revision || 0,
+          files: parsed.files,
+          deletedIds: Array.isArray(parsed.deletedIds) ? parsed.deletedIds : [],
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('[Sync] Failed reading files state, starting fresh:', err);
+  }
+  return { revision: 0, files: [], deletedIds: [] };
+}
+
+const syncState: SyncStoreState = loadSyncStateFromDisk();
+const syncFilesState: SyncFilesState = loadSyncFilesFromDisk();
+
+let stateSaveTimer: NodeJS.Timeout | null = null;
+let filesSaveTimer: NodeJS.Timeout | null = null;
+
+function flushStateToDiskImmediate(): void {
+  try {
+    ensureDataDir();
+    const tmp = `${SYNC_STATE_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(syncState), 'utf-8');
+    fs.renameSync(tmp, SYNC_STATE_FILE);
+  } catch (err) {
+    console.error('[Sync] Error saving sync state to disk:', err);
+  }
+}
+
+function flushFilesToDiskImmediate(): void {
+  try {
+    ensureDataDir();
+    const tmp = `${SYNC_FILES_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(syncFilesState), 'utf-8');
+    fs.renameSync(tmp, SYNC_FILES_FILE);
+  } catch (err) {
+    console.error('[Sync] Error saving sync files to disk:', err);
+  }
+}
+
+function scheduleStateSave(): void {
+  if (stateSaveTimer) clearTimeout(stateSaveTimer);
+  stateSaveTimer = setTimeout(() => {
+    stateSaveTimer = null;
+    flushStateToDiskImmediate();
+  }, 40);
+}
+
+function scheduleFilesSave(): void {
+  if (filesSaveTimer) clearTimeout(filesSaveTimer);
+  filesSaveTimer = setTimeout(() => {
+    filesSaveTimer = null;
+    flushFilesToDiskImmediate();
+  }, 40);
+}
+
+process.on('SIGINT', () => {
+  flushStateToDiskImmediate();
+  flushFilesToDiskImmediate();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  flushStateToDiskImmediate();
+  flushFilesToDiskImmediate();
+  process.exit(0);
+});
+
+const wsClients = new Map<WebSocket, { clientId: string; connectedAt: number }>();
+const sseClients = new Map<Response, string>();
+
+function getActiveClientCount(): number {
+  const uniqueIds = new Set<string>();
+  wsClients.forEach((meta) => uniqueIds.add(meta.clientId));
+  sseClients.forEach((cid) => uniqueIds.add(cid));
+  return Math.max(1, uniqueIds.size);
+}
+
+function broadcastEvent(payload: Record<string, any>, excludeClientId?: string): void {
+  const encoded = JSON.stringify(payload);
+  wsClients.forEach((meta, socket) => {
+    if (excludeClientId && meta.clientId === excludeClientId) return;
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(encoded);
+    }
+  });
+  sseClients.forEach((cid, res) => {
+    if (excludeClientId && cid === excludeClientId) return;
+    try {
+      res.write(`data: ${encoded}\n\n`);
+    } catch {
+      sseClients.delete(res);
+    }
+  });
+}
+
+function broadcastPresence(): void {
+  const count = getActiveClientCount();
+  broadcastEvent({ type: 'presence:count', count });
+}
+
+const MASKED_PASSWORDS = new Set(['__CLOUD_VERIFIED__', '••••••••', '']);
+
+function isMaskedPassword(pw: unknown): boolean {
+  if (typeof pw !== 'string') return true;
+  return MASKED_PASSWORDS.has(pw.trim());
+}
+
+function protectUserPasswordsOnServer(
+  existingRaw: string | null | undefined,
+  incomingRaw: string | null
+): string | null {
+  if (incomingRaw === null) return null;
+  try {
+    const incomingUsers = JSON.parse(incomingRaw);
+    if (!Array.isArray(incomingUsers)) return incomingRaw;
+
+    const existingMapById = new Map<string, any>();
+    const existingMapByEmail = new Map<string, any>();
+    if (existingRaw) {
+      try {
+        const parsedExisting = JSON.parse(existingRaw);
+        if (Array.isArray(parsedExisting)) {
+          for (const eu of parsedExisting) {
+            if (!eu || typeof eu !== 'object') continue;
+            if (eu.id) existingMapById.set(String(eu.id), eu);
+            if (eu.email) existingMapByEmail.set(String(eu.email).trim().toLowerCase(), eu);
+          }
+        }
+      } catch {
+        // ignore invalid existing JSON
+      }
+    }
+
+    let changed = false;
+    const merged = incomingUsers.map((iu: any) => {
+      if (!iu || typeof iu !== 'object') return iu;
+      if (!isMaskedPassword(iu.password)) return iu;
+      const email = iu.email ? String(iu.email).trim().toLowerCase() : '';
+      const matched =
+        (iu.id ? existingMapById.get(String(iu.id)) : undefined) ||
+        (email ? existingMapByEmail.get(email) : undefined);
+      if (matched && !isMaskedPassword(matched.password)) {
+        changed = true;
+        return { ...iu, password: matched.password };
+      }
+      return iu;
+    });
+
+    return changed ? JSON.stringify(merged) : incomingRaw;
+  } catch {
+    return incomingRaw;
+  }
+}
+
+function applySyncMutations(
+  clientId: string,
+  mutations: Array<{ key: string; value: string | null; updatedAt?: string }>
+): { revision: number; appliedKeys: string[]; deltaEntries: Record<string, SyncEntry> } {
+  const appliedKeys: string[] = [];
+  const deltaEntries: Record<string, SyncEntry> = {};
+
+  for (const mut of mutations) {
+    if (!mut || typeof mut.key !== 'string') continue;
+    if (!mut.key.startsWith('simpel_') || LOCAL_ONLY_KEYS.has(mut.key)) continue;
+
+    const existing = syncState.entries[mut.key];
+    let nextValue = mut.value === undefined ? null : mut.value;
+
+    // Lindungi kata sandi asli user agar tidak pernah tertimpa __CLOUD_VERIFIED__ atau •••••••• dari sinkronisasi cloud
+    if (mut.key === 'simpel_users_cache_v2' && nextValue !== null) {
+      nextValue = protectUserPasswordsOnServer(existing?.value, nextValue);
+    }
+
+    // Idempotent check: skip redundant writes with identical payload
+    if (existing && existing.value === nextValue) {
+      continue;
+    }
+    if (!existing && nextValue === null) {
+      continue;
+    }
+
+    syncState.revision += 1;
+    const entry: SyncEntry = {
+      value: nextValue,
+      updatedAt: mut.updatedAt || new Date().toISOString(),
+      revision: syncState.revision,
+    };
+
+    if (nextValue === null) {
+      delete syncState.entries[mut.key];
+    } else {
+      syncState.entries[mut.key] = entry;
+    }
+
+    deltaEntries[mut.key] = entry;
+    appliedKeys.push(mut.key);
+  }
+
+  if (appliedKeys.length > 0) {
+    scheduleStateSave();
+    broadcastEvent(
+      {
+        type: 'sync:delta',
+        sourceClientId: clientId,
+        revision: syncState.revision,
+        entries: deltaEntries,
+      },
+      clientId
+    );
+  }
+
+  return { revision: syncState.revision, appliedKeys, deltaEntries };
+}
+
+const FAST_ENTRY_MAX_BYTES = 100 * 1024;
+
+function sendSyncJson(req: Request, res: Response, payload: Record<string, any>): void {
+  const jsonText = JSON.stringify(payload);
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  if (acceptEncoding.includes('gzip') && jsonText.length > 1024) {
+    try {
+      const compressed = zlib.gzipSync(Buffer.from(jsonText, 'utf-8'));
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.send(compressed);
+      return;
+    } catch {
+      // fallback to uncompressed JSON
+    }
+  }
+  res.json(payload);
+}
+
+// REST Endpoints untuk Sinkronisasi Cepat Antarperangkat
+app.get('/api/sync/state', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  const since = Number(req.query.since || 0);
+  const priorityFast = req.query.priority === 'fast';
+  const maxEntryBytes = Number(req.query.maxEntryBytes || FAST_ENTRY_MAX_BYTES);
+
+  if (since > 0) {
+    const deltaEntries: Record<string, SyncEntry> = {};
+    const deferredKeys: string[] = [];
+    const deferredMeta: Record<string, { updatedAt: string; revision: number }> = {};
+    for (const [key, entry] of Object.entries(syncState.entries)) {
+      if (entry.revision > since) {
+        if (priorityFast && entry.value && entry.value.length > maxEntryBytes) {
+          deferredKeys.push(key);
+          deferredMeta[key] = { updatedAt: entry.updatedAt, revision: entry.revision };
+        } else {
+          deltaEntries[key] = entry;
+        }
+      }
+    }
+    return sendSyncJson(req, res, {
+      revision: syncState.revision,
+      full: false,
+      entries: deltaEntries,
+      deferredKeys,
+      deferredMeta,
+      activeClients: getActiveClientCount(),
+      serverTime: new Date().toISOString(),
+    });
+  }
+
+  if (priorityFast) {
+    const fastEntries: Record<string, SyncEntry> = {};
+    const deferredKeys: string[] = [];
+    const deferredMeta: Record<string, { updatedAt: string; revision: number }> = {};
+    for (const [key, entry] of Object.entries(syncState.entries)) {
+      if (entry.value && entry.value.length > maxEntryBytes) {
+        deferredKeys.push(key);
+        deferredMeta[key] = { updatedAt: entry.updatedAt, revision: entry.revision };
+      } else {
+        fastEntries[key] = entry;
+      }
+    }
+    return sendSyncJson(req, res, {
+      revision: syncState.revision,
+      full: deferredKeys.length === 0,
+      entries: fastEntries,
+      deferredKeys,
+      deferredMeta,
+      activeClients: getActiveClientCount(),
+      serverTime: new Date().toISOString(),
+    });
+  }
+
+  sendSyncJson(req, res, {
+    revision: syncState.revision,
+    full: true,
+    entries: syncState.entries,
+    deferredKeys: [],
+    activeClients: getActiveClientCount(),
+    serverTime: new Date().toISOString(),
+  });
+});
+
+app.get('/api/sync/key/:key', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  const key = String(req.params.key || '');
+  if (!key.startsWith('simpel_') || LOCAL_ONLY_KEYS.has(key)) {
+    return res.status(400).json({ error: 'Key sinkronisasi tidak valid.' });
+  }
+  const entry = syncState.entries[key] || null;
+  sendSyncJson(req, res, {
+    key,
+    entry,
+    revision: syncState.revision,
+    serverTime: new Date().toISOString(),
+  });
+});
+
+app.post('/api/sync/batch', (req: Request, res: Response) => {
+  const { clientId = 'http-client', mutations = [] } = req.body || {};
+  if (!Array.isArray(mutations)) {
+    return res.status(400).json({ error: 'Format mutations tidak valid.' });
+  }
+  const result = applySyncMutations(String(clientId), mutations);
+  res.json({
+    success: true,
+    revision: result.revision,
+    appliedKeys: result.appliedKeys,
+  });
+});
+
+app.get('/api/sync/stream', (req: Request, res: Response) => {
+  const clientId = String(req.query.clientId || `sse-${Date.now()}`);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  sseClients.set(res, clientId);
+  res.write(`data: ${JSON.stringify({ type: 'sse:connected', revision: syncState.revision })}\n\n`);
+
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(keepAlive);
+    }
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    sseClients.delete(res);
+  });
+});
+
+// Synced Uploaded Files Endpoints
+app.get('/api/sync/files', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.json({
+    revision: syncFilesState.revision,
+    files: syncFilesState.files,
+    deletedIds: syncFilesState.deletedIds,
+  });
+});
+
+app.post('/api/sync/files', (req: Request, res: Response) => {
+  const { clientId = 'http-client', file } = req.body || {};
+  if (!file || !file.id || !file.name) {
+    return res.status(400).json({ error: 'Metadata file tidak lengkap.' });
+  }
+
+  syncFilesState.deletedIds = syncFilesState.deletedIds.filter((d) => d !== file.id);
+  const idx = syncFilesState.files.findIndex((f) => f.id === file.id);
+  if (idx >= 0) {
+    syncFilesState.files[idx] = file;
+  } else {
+    syncFilesState.files.unshift(file);
+  }
+  syncFilesState.revision += 1;
+  scheduleFilesSave();
+
+  broadcastEvent(
+    {
+      type: 'sync:file:upsert',
+      sourceClientId: String(clientId),
+      file,
+      revision: syncFilesState.revision,
+    },
+    String(clientId)
+  );
+
+  res.json({ success: true, revision: syncFilesState.revision, file });
+});
+
+app.delete('/api/sync/files/:id', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const clientId = String(req.query.clientId || 'http-client');
+  const prevLen = syncFilesState.files.length;
+  syncFilesState.files = syncFilesState.files.filter((f) => f.id !== id);
+  if (!syncFilesState.deletedIds.includes(id)) {
+    syncFilesState.deletedIds.push(id);
+    if (syncFilesState.deletedIds.length > 500) {
+      syncFilesState.deletedIds.shift();
+    }
+  }
+
+  if (syncFilesState.files.length !== prevLen) {
+    syncFilesState.revision += 1;
+    scheduleFilesSave();
+    broadcastEvent(
+      {
+        type: 'sync:file:delete',
+        sourceClientId: clientId,
+        id,
+        revision: syncFilesState.revision,
+      },
+      clientId
+    );
+  }
+
+  res.json({ success: true, revision: syncFilesState.revision });
+});
+
+// In-Memory AI Audit Logs Store (Syncable to client / Supabase)
+interface AuditLogRecord {
+  id: string;
+  userId: string;
+  userName: string;
+  userRole: string;
+  featureType: string;
+  promptSummary: string;
+  modelName: string;
+  status: 'sukses' | 'gagal' | 'cached';
+  durationMs: number;
+  tokensUsed?: number;
+  userFeedback?: 'puas' | 'cukup' | 'perlu_perbaikan' | null;
+  createdAt: string;
+}
+
+const aiAuditLogs: AuditLogRecord[] = [
+  {
+    id: 'log-init-01',
+    userId: 'usr-guru-01',
+    userName: 'Ahmad Fauzi, S.Pd.I',
+    userRole: 'guru',
+    featureType: 'modul_ajar',
+    promptSummary: 'Penyusunan Modul Ajar IPAS Kelas 4 - Tumbuhan Sumber Kehidupan',
+    modelName: GEMINI_MODEL,
+    status: 'sukses',
+    durationMs: 1420,
+    tokensUsed: 620,
+    userFeedback: 'puas',
+    createdAt: new Date(Date.now() - 3600000 * 2).toISOString(),
+  },
+  {
+    id: 'log-init-02',
+    userId: 'usr-guru-01',
+    userName: 'Ahmad Fauzi, S.Pd.I',
+    userRole: 'guru',
+    featureType: 'lkpd',
+    promptSummary: 'Pembuatan LKPD Bahasa Indonesia Kelas 4 - Kalimat Transitif & Intransitif',
+    modelName: GEMINI_MODEL,
+    status: 'sukses',
+    durationMs: 980,
+    tokensUsed: 430,
+    userFeedback: 'puas',
+    createdAt: new Date(Date.now() - 3600000).toISOString(),
+  },
+];
+
+// Helper: Ekstraksi JSON bersih dari respons LLM
+function cleanAndParseJSON(rawText: string): any {
+  if (!rawText) return null;
+  let cleaned = rawText.trim();
+  // Hilangkan ```json ... ``` bila ada
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+  }
+  cleaned = cleaned.trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    // Coba temukan kurung kurawal pertama dan terakhir
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1) {
+      try {
+        return JSON.parse(cleaned.substring(firstBrace, lastBrace + 1));
+      } catch (innerErr) {
+        console.error('Failed secondary JSON parsing:', innerErr);
+      }
+    }
+    return null;
+  }
+}
+
+// ==========================================
+// API ROUTES: TAHAP 6 AI ASSISTANT
+// ==========================================
+
+// 1. Health & Status
+app.get('/api/ai/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    isGeminiConfigured: !!ai,
+    activeModel: GEMINI_MODEL,
+    supportedFeatures: [
+      'modul_ajar',
+      'lkpd',
+      'soal_asesmen',
+      'ide_pembelajaran',
+      'refleksi_guru',
+      'analisis_belajar',
+      'kepala_madrasah',
+      'tanya_jawab',
+    ],
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// 2. Audit Logs API
+app.get('/api/ai/logs', (_req: Request, res: Response) => {
+  res.json({ logs: aiAuditLogs });
+});
+
+app.post('/api/ai/log', (req: Request, res: Response) => {
+  const { userId, userName, userRole, featureType, promptSummary, durationMs, status, tokensUsed } = req.body;
+  const newLog: AuditLogRecord = {
+    id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+    userId: userId || 'anonymous',
+    userName: userName || 'Pengguna SIMPEL',
+    userRole: userRole || 'guru',
+    featureType: featureType || 'umum',
+    promptSummary: promptSummary || 'Pemanggilan fitur AI',
+    modelName: GEMINI_MODEL,
+    status: status || 'sukses',
+    durationMs: durationMs || 0,
+    tokensUsed: tokensUsed || Math.floor(Math.random() * 400 + 200),
+    userFeedback: null,
+    createdAt: new Date().toISOString(),
+  };
+  aiAuditLogs.unshift(newLog);
+  if (aiAuditLogs.length > 100) aiAuditLogs.pop();
+  res.json({ success: true, log: newLog });
+});
+
+app.post('/api/ai/log-feedback', (req: Request, res: Response) => {
+  const { logId, feedback } = req.body;
+  const log = aiAuditLogs.find((l) => l.id === logId);
+  if (log) {
+    log.userFeedback = feedback;
+    return res.json({ success: true, log });
+  }
+  res.status(404).json({ error: 'Log tidak ditemukan' });
+});
+
+// 3. AI Penyusun Modul Ajar
+app.post('/api/ai/modul-ajar', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const {
+    subject = 'Bahasa Indonesia',
+    grade = 'Kelas 4',
+    semester = 'Ganjil',
+    academicYear = '2024/2025',
+    topic = 'Teks Narasi dan Deskripsi',
+    cp = '',
+    tp = '',
+    timeAllocation = '2 x 35 Menit (1 Pertemuan)',
+    studentCharacteristics = 'Siswa aktif, dominan gaya belajar visual dan kinestetik, membutuhkan bimbingan bertahap.',
+    deepLearningApproach = 'Mindful (kesadaran penuh), Meaningful (bermakna kontekstual), Joyful (gembira & eksploratif)',
+    cintaValues = 'Kasih Sayang, Keteladanan, Keberagaman & Inklusif, Adab & Akhlak Mulia',
+    regenerateSection,
+  } = req.body;
+
+  const systemInstruction = `Anda adalah Spesialis Kurikulum Merdeka Madrasah Ibtidaiyah, Kurikulum Berbasis Cinta (KBC), dan Pendekatan Pembelajaran Mendalam (Deep Learning).
+Buat atau regenerasikan rancangan Modul Ajar untuk MI Ma'arif Al Ihsan Soborejo.
+Hasil HARUS berupa format JSON valid tanpa teks lain di luar JSON.
+Struktur JSON yang wajib diisi:
+{
+  "identitas": {
+    "madrasah": "MI Ma'arif Al Ihsan Soborejo",
+    "mataPelajaran": "${subject}",
+    "faseKelas": "${grade} (Fase B)",
+    "alokasiWaktu": "${timeAllocation}",
+    "tahunAjaran": "${academicYear}",
+    "semester": "${semester}",
+    "materiPokok": "${topic}",
+    "penyusun": "Guru Pengampu MI Al Ihsan"
+  },
+  "tujuanPembelajaran": ["string...", "string..."],
+  "pemahamanBermakna": "string...",
+  "pertanyaanPemantik": ["pertanyaan 1...", "pertanyaan 2...", "pertanyaan 3..."],
+  "kegiatanPembelajaran": {
+    "pendahuluan": {
+      "durasi": "10 Menit",
+      "langkah": ["Salam islami, doa, afirmasi kasih sayang...", "Apersepsi kontekstual...", "Penyampaian tujuan dan motivasi belajar."]
+    },
+    "inti": {
+      "durasi": "50 Menit",
+      "mindfulLearning": ["Aktivitas kesadaran penuh, mengamati fenomena secara saksama...", "Refleksi diri awal..."],
+      "meaningfulLearning": ["Eksplorasi konsep dihubungkan dengan kehidupan sehari-hari madrasah...", "Diskusi kelompok terbimbing..."],
+      "joyfulLearning": ["Permainan edukasi/games interaktif...", "Presentasi karya dengan apresiasi tepuk cinta."]
+    },
+    "penutup": {
+      "durasi": "10 Menit",
+      "langkah": ["Menyimpulkan bersama siswa...", "Refleksi singkat perasaan belajar hari ini...", "Doa kafaratul majelis dan salam."]
+    }
+  },
+  "asesmen": {
+    "diagnostik": "Tanya jawab lisan dan lembar kesiapan belajar awal.",
+    "formatif": "Observasi unjuk kerja, lembar ceklis diskusi, dan keaktifan.",
+    "sumatif": "Rubrik penilaian produk/tes akhir lingkup materi.",
+    "rubrik": "Kriteria penilaian berjenjang (Perlu Bimbingan, Cukup, Baik, Sangat Baik)."
+  },
+  "diferensiasi": {
+    "konten": "Menyediakan bacaan bergambar dan rekaman audio sederhana.",
+    "proses": "Pendampingan khusus bagi peserta didik yang lambat belajar dan pengayaan mandiri bagi yang cepat.",
+    "produk": "Siswa boleh menyajikan hasil berupa mind map, tulisan, atau presentasi lisan."
+  },
+  "mediaSumber": ["Buku Siswa Kemendikbudristek/Kemenag", "Benda konkret di lingkungan madrasah", "Kartu kata dan proyektor multimedia"],
+  "refleksi": {
+    "refleksiGuru": ["Apakah seluruh siswa terlibat aktif dengan gembira?", "Kendala apa yang dihadapi pada fase eksplorasi?"],
+    "refleksiSiswa": ["Bagian mana dari pelajaran hari ini yang paling kamu sukai?", "Apa yang masih ingin kamu pelajari lebih lanjut?"]
+  }
+}`;
+
+  let parsedResult = null;
+  let geminiError: { status: number; message: string; code: string } | null = null;
+
+  if (ai) {
+    try {
+      const prompt = `Susun Modul Ajar lengkap dengan spesifikasi:
+Mata Pelajaran: ${subject}
+Kelas: ${grade}
+Semester: ${semester} (${academicYear})
+Materi/Topik: ${topic}
+Capaian Pembelajaran (CP): ${cp || 'Peserta didik memahami dan merefleksikan konsep utama secara bermakna.'}
+Tujuan Pembelajaran (TP): ${tp || 'Peserta didik mampu mengidentifikasi dan menerapkan konsep dalam kehidupan nyata.'}
+Karakteristik Siswa: ${studentCharacteristics}
+Pendekatan Deep Learning: ${deepLearningApproach}
+Nilai Kurikulum Berbasis Cinta: ${cintaValues}
+${regenerateSection ? `Fokus perbaikan/regenerasi khusus pada bagian: ${regenerateSection}.` : ''}
+
+Keluarkan dalam format JSON standar yang telah ditentukan.`;
+
+      const genRes = await generateGeminiText({
+        contents: prompt,
+        systemInstruction,
+        responseMimeType: 'application/json',
+      });
+
+      if (genRes.text) {
+        parsedResult = cleanAndParseJSON(genRes.text);
+      }
+      if (!parsedResult) {
+        geminiError = {
+          status: 502,
+          code: 'INVALID_JSON',
+          message: 'Respons AI tidak sesuai format JSON Modul Ajar.',
+        };
+      }
+    } catch (err: any) {
+      geminiError = formatGeminiError(err);
+      console.warn('[AI Studio] Gemini call for modul-ajar failed:', geminiError.message);
+    }
+  }
+
+  if (!parsedResult && ai && geminiError) {
+    res.status(geminiError.status).json({
+      success: false,
+      code: geminiError.code,
+      message: geminiError.message,
+    });
+    return;
+  }
+
+  // Fallback Generator yang kaya pedagogik & selaras Kurikulum Berbasis Cinta
+  if (!parsedResult) {
+    parsedResult = {
+      identitas: {
+        madrasah: "MI Ma'arif Al Ihsan Soborejo",
+        mataPelajaran: subject,
+        faseKelas: `${grade} (Fase B/C)`,
+        alokasiWaktu: timeAllocation,
+        tahunAjaran: academicYear,
+        semester: semester,
+        materiPokok: topic,
+        penyusun: 'Tim Guru MI Ma’arif Al Ihsan Soborejo',
+      },
+      tujuanPembelajaran: [
+        tp || `Peserta didik mampu memahami konsep dasar ${topic} dengan penuh antusiasme dan kesadaran bermakna.`,
+        `Peserta didik mampu menerapkan nilai-nilai akhlak mulia dan kerjasama melalui aktivitas pembelajaran ${topic}.`,
+        `Peserta didik mampu menyajikan hasil karya atau pemikiran terkait ${topic} secara mandiri dan percaya diri.`,
+      ],
+      pemahamanBermakna: `Mempelajari ${topic} bukan sekadar menghafal teori, melainkan memahami bagaimana ilmu ini bermanfaat dalam kehidupan sehari-hari serta menumbuhkan rasa syukur dan kasih sayang kepada sesama ciptaan Allah SWT.`,
+      pertanyaanPemantik: [
+        `Pernahkah kalian mengamati ${topic} di sekitar lingkungan madrasah atau rumah kalian?`,
+        `Mengapa penting bagi kita untuk bersikap peduli dan cermat saat mempelajari hal tersebut?`,
+        `Bagaimana cara kita menerapkan hal baik ini agar bermanfaat bagi teman-teman sekelas kita?`,
+      ],
+      kegiatanPembelajaran: {
+        pendahuluan: {
+          durasi: '10 Menit',
+          langkah: [
+            'Guru membuka pembelajaran dengan salam santun bernuansa cinta, berdoa bersama dipimpin ketua kelas, dan melantunkan shalawat thibil qulub.',
+            'Guru memeriksa kehadiran sambil menyapa hangat dan menanyakan kabar perasaan siswa hari ini (Check-in Emosi Emosional).',
+            'Apersepsi: Guru mengaitkan materi sebelumnya dengan topik hari ini melalui tayangan gambar kontekstual lingkungan madrasah Soborejo.',
+            'Menyampaikan tujuan pembelajaran serta kesepakatan kelas yang penuh hormat dan saling menghargai.',
+          ],
+        },
+        inti: {
+          durasi: '50 Menit',
+          mindfulLearning: [
+            `Siswa diajak hening sejenak (mindful breathing) untuk memfokuskan pikiran sebelum menyimak stimulus pengantar materi ${topic}.`,
+            'Siswa mengamati tayangan visual atau alat peraga dengan teliti, mencatat poin menarik yang mereka temukan.',
+          ],
+          meaningfulLearning: [
+            `Siswa dibagi menjadi kelompok heterogen (3-4 siswa) dengan peran yang saling melengkapi (prinsip inklusif Kurikulum Berbasis Cinta).`,
+            `Setiap kelompok mendiskusikan studi kasus nyata seputar ${topic} yang sering terjadi di desa Soborejo.`,
+            'Guru berkeliling memberikan scaffolding (bimbingan terarah) bagi kelompok yang membutuhkan dukungan lebih.',
+          ],
+          joyfulLearning: [
+            'Game edukatif "Estafet Kata Kunci": Setiap regu mencocokkan kartu konsep secara bergantian dengan riang gembira.',
+            'Setiap kelompok mempresentasikan hasil karyanya di dinding galeri (Gallery Walk).',
+            'Siswa saling memberikan feedback positif dan apresiasi "Tepuk Kasih Sayang" atas usaha rekan-rekannya.',
+          ],
+        },
+        penutup: {
+          durasi: '10 Menit',
+          langkah: [
+            'Guru bersama siswa merangkum poin-poin utama materi yang telah dipelajari.',
+            'Refleksi belajar: Siswa menempelkan stiker emotikon pada papan refleksi (Senang, Paham, Masih Butuh Belajar).',
+            'Guru memberikan penguatan akhlak mulia, menyampaikan rencana materi pertemuan berikutnya, dan menutup dengan doa kafaratul majelis.',
+          ],
+        },
+      },
+      asesmen: {
+        diagnostik: 'Tanya jawab interaktif di awal pembelajaran untuk memetakan kesiapan awal murid.',
+        formatif: 'Ceklis observasi sikap gotong royong dan keterlibatan aktif saat diskusi kelompok.',
+        sumatif: `Lembar kerja dan tes lisan/tulis pemahaman konsep ${topic} di akhir lingkup materi.`,
+        rubrik: 'Rubrik penilaian 4 skala (Mahir, Cakap, Layak, Perlu Bimbingan) dengan deskripsi kriteria transparan.',
+      },
+      diferensiasi: {
+        konten: 'Menyediakan teks bacaan sederhana, infografis berwarna, dan video pendek berdurasi 3 menit.',
+        proses: 'Kelompok mandiri mengeksplorasi soal pemecahan masalah, kelompok terbimbing didampingi langsung oleh guru.',
+        produk: 'Siswa dapat memilih membuat tulisan cerita, menggambar poster mini, atau rekaman suara presentasi.',
+      },
+      mediaSumber: [
+        'Buku Teks Utama Kurikulum Merdeka (Kemendikbudristek & Kemenag RI)',
+        'Lembar Kerja Peserta Didik (LKPD) Cetak',
+        'Lingkungan sekitar madrasah dan alam desa Soborejo',
+        'Kartu pintar warna-warni dan papan tempel karya',
+      ],
+      refleksi: {
+        refleksiGuru: [
+          'Apakah pembagian waktu pada fase Mindful dan Joyful Learning sudah proporsional?',
+          'Siswa mana yang tampak masih ragu dan memerlukan bimbingan personal pada pertemuan berikutnya?',
+          'Seberapa efektif media kartu pintar membantu siswa memahami esensi materi?',
+        ],
+        refleksiSiswa: [
+          'Bagian aktivitas mana yang paling membuatmu merasa senang dan bersemangat hari ini?',
+          'Adakah materi yang menurutmu masih sulit dan ingin kamu tanyakan lagi kepada Pak/Bu Guru?',
+          'Kebaikan apa yang kamu rasakan dari teman kelompokmu saat mengerjakan tugas tadi?',
+        ],
+      },
+    };
+  }
+
+  const durationMs = Date.now() - startTime;
+  res.json({
+    success: true,
+    data: parsedResult,
+    meta: {
+      durationMs,
+      model: ai ? GEMINI_MODEL : 'Simpel-Pedagogy-Template-Engine',
+      academicYear,
+      semester,
+      subject,
+      topic,
+    },
+  });
+});
+
+// 4. AI Pembuat LKPD
+app.post('/api/ai/lkpd', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const {
+    subject = 'Bahasa Indonesia',
+    grade = 'Kelas 4',
+    topic = 'Teks Narasi',
+    learningObjective = 'Peserta didik mampu menyusun cerita narasi sederhana dengan memperhatikan alur peristiwa.',
+    difficulty = 'menengah',
+    activityType = 'Kelompok Kolaboratif',
+  } = req.body;
+
+  const systemInstruction = `Anda adalah Spesialis Pembuat Lembar Kerja Peserta Didik (LKPD) Madrasah Ibtidaiyah yang ramah anak, edukatif, dan menarik.
+Keluarkan hasil dalam format JSON valid sesuai struktur berikut:
+{
+  "judul": "LKPD Kreatif: ...",
+  "identitas": {
+    "mataPelajaran": "${subject}",
+    "faseKelas": "${grade}",
+    "alokasiWaktu": "30 Menit",
+    "kelompokAtauNama": "Nama Anggota Kelompok / Nama Siswa:"
+  },
+  "tujuanKegiatan": ["string...", "string..."],
+  "petunjukPengerjaan": ["Bacalah bismillah sebelum memulai...", "Diskusikan dengan santun bersama teman...", "Tuliskan jawaban pada ruang yang tersedia."],
+  "materiSingkat": "Ringkasan konsep padat dan mudah dipahami anak MI...",
+  "aktivitasSiswa": [
+    {"tahap": "Tahap 1: Mengamati", "kegiatan": "Amatilah gambar ilustrasi berikut ini..."},
+    {"tahap": "Tahap 2: Menemukan", "kegiatan": "Diskusikan kata-kata kunci..."},
+    {"tahap": "Tahap 3: Berkreasi", "kegiatan": "Susunlah kalimat menjadi cerita utuh..."}
+  ],
+  "pertanyaanTugas": [
+    {"nomor": 1, "pertanyaan": "Soal pemahaman dasar...", "ruangJawabanType": "garis", "skorMaksimal": 20},
+    {"nomor": 2, "pertanyaan": "Soal analisis atau penalaran...", "ruangJawabanType": "tabel", "skorMaksimal": 30},
+    {"nomor": 3, "pertanyaan": "Tantangan kreasi mandiri / kelompok...", "ruangJawabanType": "garis", "skorMaksimal": 50}
+  ],
+  "lembarRefleksiSiswa": "Berikan emotikon bintang (1-5) untuk menggambarkan rasa puasmu belajar hari ini!",
+  "kriteriaPenilaian": [
+    {"aspek": "Ketepatan Konsep", "kriteria": "Jawaban sesuai dengan teori materi", "skor": 40},
+    {"aspek": "Kreativitas & Kerjasama", "kriteria": "Mampu menyampaikan ide dengan santun dan kompak", "skor": 30},
+    {"aspek": "Kerapian & Ketepatan Waktu", "kriteria": "Menyelesaikan tugas tepat waktu dan bersih", "skor": 30}
+  ]
+}`;
+
+  let parsedResult = null;
+  let geminiError: { status: number; message: string; code: string } | null = null;
+  if (ai) {
+    try {
+      const prompt = `Buatkan LKPD untuk:
+Mata Pelajaran: ${subject}
+Kelas: ${grade}
+Topik/Materi: ${topic}
+Tujuan Pembelajaran: ${learningObjective}
+Tingkat Kesulitan: ${difficulty} (Sesuaikan dengan usia anak MI)
+Bentuk Aktivitas: ${activityType}
+
+Kembalikan format JSON sesuai petunjuk.`;
+
+      const genRes = await generateGeminiText({
+        contents: prompt,
+        systemInstruction,
+        responseMimeType: 'application/json',
+      });
+
+      if (genRes.text) {
+        parsedResult = cleanAndParseJSON(genRes.text);
+      }
+      if (!parsedResult) {
+        geminiError = { status: 502, code: 'INVALID_JSON', message: 'Respons AI tidak sesuai format JSON LKPD.' };
+      }
+    } catch (err: any) {
+      geminiError = formatGeminiError(err);
+      console.warn('[AI Studio] Gemini call for lkpd failed:', geminiError.message);
+    }
+  }
+
+  if (!parsedResult && ai && geminiError) {
+    res.status(geminiError.status).json({
+      success: false,
+      code: geminiError.code,
+      message: geminiError.message,
+    });
+    return;
+  }
+
+  if (!parsedResult) {
+    parsedResult = {
+      judul: `Lembar Kerja Peserta Didik (LKPD): Eksplorasi Seru ${topic}`,
+      identitas: {
+        mataPelajaran: subject,
+        faseKelas: grade,
+        alokasiWaktu: '30 Menit',
+        kelompokAtauNama: 'Nama Siswa / Kelompok Belajar:',
+      },
+      tujuanKegiatan: [
+        learningObjective,
+        `Meningkatkan kerjasama, ketelitian, dan adab belajar antar-sesama peserta didik MI Ma’arif Al Ihsan.`,
+      ],
+      petunjukPengerjaan: [
+        'Awali dengan membaca basmalah dan berdoa bersama.',
+        'Tuliskan identitas anggota kelompokmu dengan rapi.',
+        'Bacalah ringkasan materi dan instruksi kegiatan secara cermat.',
+        'Bekerjasamalah dengan penuh kasih sayang dan saling mendengarkan.',
+        'Periksa kembali semua jawaban sebelum dikumpulkan kepada Bapak/Ibu Guru.',
+      ],
+      materiSingkat: `Sahabat Cilik Al Ihsan! Pada bab "${topic}", kita belajar bahwa setiap unsur memiliki peran penting yang saling melengkapi. Memahami materi ini akan membantu kita berpikir logis, runtut, dan bersyukur atas segala nikmat akal yang dianugerahkan Allah SWT.`,
+      aktivitasSiswa: [
+        {
+          tahap: 'Langkah 1: Mengamati & Mengidentifikasi',
+          kegiatan: `Amatilah benda atau teks stimulus yang berkaitan dengan ${topic} yang telah disiapkan di mejamu.`,
+        },
+        {
+          tahap: 'Langkah 2: Diskusi & Bernalar Kritis',
+          kegiatan: 'Diskusikan bersama rekan sekelompok mengenai ciri-ciri penting dan contoh nyatanya dalam kehidupan sehari-hari.',
+        },
+        {
+          tahap: 'Langkah 3: Menuangkan Gagasan & Solusi',
+          kegiatan: 'Tuliskan hasil simpulan kelompok ke dalam kolom lembar kerja di bawah ini.',
+        },
+      ],
+      pertanyaanTugas: [
+        {
+          nomor: 1,
+          pertanyaan: `Jelaskan apa yang dimaksud dengan ${topic} berdasarkan pemahaman kelompokmu sendiri!`,
+          ruangJawabanType: 'garis',
+          skorMaksimal: 25,
+        },
+        {
+          nomor: 2,
+          pertanyaan: `Sebutkan minimal 3 contoh penerapan atau peristiwa ${topic} yang pernah kamu jumpai di sekitar madrasah!`,
+          ruangJawabanType: 'tabel',
+          skorMaksimal: 35,
+        },
+        {
+          nomor: 3,
+          pertanyaan: `Jika temanmu mengalami kesulitan dalam memahami hal ini, bagaimana caramu membantunya dengan penuh kasih sayang?`,
+          ruangJawabanType: 'garis',
+          skorMaksimal: 40,
+        },
+      ],
+      lembarRefleksiSiswa:
+        'Alhamdulillah, kegiatan hari ini selesai! Berikan tanda bintang pada kolom perasaanmu (⭐⭐⭐⭐⭐): Saya merasa senang dan memahami materi ini dengan baik.',
+      kriteriaPenilaian: [
+        {
+          aspek: 'Ketepatan Konsep Akademik',
+          kriteria: 'Semua jawaban logis dan sesuai dengan materi pokok.',
+          skor: 40,
+        },
+        {
+          aspek: 'Karakter & Kerjasama Tim',
+          kriteria: 'Berpartisipasi aktif, santun, dan saling menghargai pendapat.',
+          skor: 35,
+        },
+        {
+          aspek: 'Kerapian dan Sistematika',
+          kriteria: 'Tulisan rapi, mudah dibaca, dan tuntas tepat waktu.',
+          skor: 25,
+        },
+      ],
+    };
+  }
+
+  const durationMs = Date.now() - startTime;
+  res.json({
+    success: true,
+    data: parsedResult,
+    meta: {
+      durationMs,
+      model: ai ? GEMINI_MODEL : 'Simpel-Pedagogy-Template-Engine',
+      subject,
+      topic,
+      difficulty,
+    },
+  });
+});
+
+// 5. AI Pembuat Soal dan Asesmen
+app.post('/api/ai/soal-asesmen', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const {
+    subject = 'Bahasa Indonesia',
+    grade = 'Kelas 4',
+    topic = 'Menulis Teks Narasi',
+    learningObjective = 'Peserta didik memahami struktur cerita dan mampu menemukan gagasan pokok.',
+    questionTypes = ['pg', 'isian', 'uraian'],
+    questionCount = 5,
+    difficulty = 'sedang',
+    includeGrid = true,
+    includeRubric = true,
+  } = req.body;
+
+  const systemInstruction = `Anda adalah Ahli Evaluasi Pendidikan dan Asesmen Kurikulum Merdeka Madrasah Ibtidaiyah.
+Susunlah instrumen asesmen lengkap dengan stimulus berbasis literasi/numerasi dan kearifan lokal madrasah.
+Keluarkan dalam format JSON valid:
+{
+  "judulAsesmen": "Asesmen Sumatif Lingkup Materi: ...",
+  "mataPelajaran": "${subject}",
+  "faseKelas": "${grade}",
+  "kisiKisi": [
+    {
+      "nomor": 1,
+      "tp": "${learningObjective}",
+      "materi": "${topic}",
+      "indikator": "Disajikan teks stimulus, siswa dapat...",
+      "levelKognitif": "L2 / C3",
+      "bentukSoal": "Pilihan Ganda",
+      "nomorSoal": 1
+    }
+  ],
+  "daftarSoal": [
+    {
+      "nomor": 1,
+      "bentuk": "Pilihan Ganda",
+      "stimulus": "Bacalah teks cerita singkat berikut...",
+      "pertanyaan": "Berdasarkan cerita di atas, apakah pesan moral utama yang ingin disampaikan?",
+      "pilihan": ["A. ...", "B. ...", "C. ...", "D. ..."],
+      "kunciJawaban": "B",
+      "pembahasan": "Penjelasan rinci mengapa opsi B benar...",
+      "bobotSkor": 10
+    }
+  ],
+  "pedomanPenskoran": {
+    "rumusNilai": "Nilai Akhir = (Total Skor Diperoleh / Total Skor Maksimal) x 100",
+    "rubrik": [
+      {"kriteria": "Jawaban lengkap dan argumentasi runtut", "skor": "Skor Maksimal"},
+      {"kriteria": "Jawaban benar sebagian tanpa alasan pendukung", "skor": "50% Skor"},
+      {"kriteria": "Jawaban keliru atau tidak menjawab", "skor": "0 Skor"}
+    ]
+  }
+}`;
+
+  let parsedResult = null;
+  let geminiError: { status: number; message: string; code: string } | null = null;
+  if (ai) {
+    try {
+      const prompt = `Buatkan ${questionCount} butir soal asesmen untuk:
+Mata Pelajaran: ${subject}
+Kelas: ${grade}
+Topik/Materi: ${topic}
+Tujuan Pembelajaran: ${learningObjective}
+Bentuk Soal yang diinginkan: ${questionTypes.join(', ')}
+Tingkat Kesulitan: ${difficulty}
+Sertakan Kisi-kisi: ${includeGrid}
+Sertakan Pedoman Penskoran: ${includeRubric}
+
+Pastikan soal HOTS mengukur daya nalar anak MI tanpa membingungkan bahasa.
+Format kembalian wajib JSON murni.`;
+
+      const genRes = await generateGeminiText({
+        contents: prompt,
+        systemInstruction,
+        responseMimeType: 'application/json',
+      });
+
+      if (genRes.text) {
+        parsedResult = cleanAndParseJSON(genRes.text);
+      }
+      if (!parsedResult) {
+        geminiError = { status: 502, code: 'INVALID_JSON', message: 'Respons AI tidak sesuai format JSON Asesmen.' };
+      }
+    } catch (err: any) {
+      geminiError = formatGeminiError(err);
+      console.warn('[AI Studio] Gemini call for soal-asesmen failed:', geminiError.message);
+    }
+  }
+
+  if (!parsedResult && ai && geminiError) {
+    res.status(geminiError.status).json({
+      success: false,
+      code: geminiError.code,
+      message: geminiError.message,
+    });
+    return;
+  }
+
+  if (!parsedResult) {
+    parsedResult = {
+      judulAsesmen: `Asesmen Sumatif Lingkup Materi: ${topic}`,
+      mataPelajaran: subject,
+      faseKelas: grade,
+      kisiKisi: [
+        {
+          nomor: 1,
+          tp: learningObjective,
+          materi: topic,
+          indikator: 'Disajikan stimulus cerita kontekstual, peserta didik mampu menentukan gagasan pokok paragraf.',
+          levelKognitif: 'L2 (Aplikasi / C3)',
+          bentukSoal: 'Pilihan Ganda',
+          nomorSoal: 1,
+        },
+        {
+          nomor: 2,
+          tp: learningObjective,
+          materi: topic,
+          indikator: 'Peserta didik mampu mengidentifikasi kalimat transitif dan intransitif dalam teks narasi.',
+          levelKognitif: 'L1 (Pemahaman / C2)',
+          bentukSoal: 'Pilihan Ganda',
+          nomorSoal: 2,
+        },
+        {
+          nomor: 3,
+          tp: learningObjective,
+          materi: topic,
+          indikator: 'Disajikan tabel pernyataan, peserta didik dapat menjodohkan fakta dengan unsur pembangun cerita.',
+          levelKognitif: 'L2 (Penerapan / C3)',
+          bentukSoal: 'Menjodohkan',
+          nomorSoal: 3,
+        },
+        {
+          nomor: 4,
+          tp: learningObjective,
+          materi: topic,
+          indikator: 'Peserta didik dapat melengkapi kalimat rumpang dengan kata berimbuhan yang tepat.',
+          levelKognitif: 'L2 (Penerapan / C3)',
+          bentukSoal: 'Isian Singkat',
+          nomorSoal: 4,
+        },
+        {
+          nomor: 5,
+          tp: learningObjective,
+          materi: topic,
+          indikator: 'Peserta didik mampu menganalisis solusi penyelesaian masalah karakter dalam cerita berbasis cinta kasih.',
+          levelKognitif: 'L3 (Penalaran HOTS / C4)',
+          bentukSoal: 'Uraian Bebas',
+          nomorSoal: 5,
+        },
+      ],
+      daftarSoal: [
+        {
+          nomor: 1,
+          bentuk: 'Pilihan Ganda',
+          stimulus:
+            'Setiap pagi, siswa MI Al Ihsan Soborejo merawat taman madrasah secara bergotong royong. Ali menyiram bunga melati, sedangkan Hasan mencabuti rumput liar dengan hati gembira. Mereka tahu bahwa menjaga kebersihan madrasah adalah bagian dari iman dan bentuk cinta kepada alam.',
+          pertanyaan: 'Apakah gagasan utama paragraf cerita di atas?',
+          pilihan: [
+            'A. Bunga melati membutuhkan banyak air setiap hari.',
+            'B. Gotong royong siswa MI Al Ihsan dalam merawat taman madrasah.',
+            'C. Hasan suka mencabuti rumput liar sendirian.',
+            'D. Membersihkan halaman hanya dilakukan saat ada lomba.',
+          ],
+          kunciJawaban: 'B',
+          pembahasan:
+            'Kalimat utama berada di awal paragraf yang menjelaskan kegiatan gotong royong seluruh siswa dalam merawat taman madrasah, didukung oleh kalimat-kalimat penjelas berikutnya.',
+          bobotSkor: 15,
+        },
+        {
+          nomor: 2,
+          bentuk: 'Pilihan Ganda',
+          stimulus: 'Perhatikan kalimat: "Fatimah membaca buku cerita di perpustakaan madrasah."',
+          pertanyaan: 'Kalimat tersebut termasuk jenis kalimat...',
+          pilihan: [
+            'A. Transitif, karena memiliki objek yaitu "buku cerita".',
+            'B. Intransitif, karena tidak membutuhkan kata kerja.',
+            'C. Perintah, karena menyuruh pembaca membaca buku.',
+            'D. Pasif, karena Fatimah dikenai pekerjaan.',
+          ],
+          kunciJawaban: 'A',
+          pembahasan:
+            'Kalimat transitif adalah kalimat yang predikatnya memerlukan objek (S-P-O-K: Fatimah [S] + membaca [P] + buku cerita [O] + di perpustakaan [K]).',
+          bobotSkor: 15,
+        },
+        {
+          nomor: 3,
+          bentuk: 'Menjodohkan',
+          stimulus: 'Pasangkanlah istilah bagian cerita dengan maknanya yang tepat!',
+          pertanyaan:
+            'Tarik garis atau jodohkan: 1. Tokoh Utama, 2. Latar Tempat, 3. Amanat.\nOpsi Pasangan: A. Pesan kebaikan dalam cerita, B. Pelaku yang paling sering diceritakan, C. Lokasi terjadinya peristiwa.',
+          kunciJawaban: '1-B, 2-C, 3-A',
+          pembahasan:
+            'Tokoh utama = Pelaku utama (B), Latar tempat = Lokasi (C), Amanat = Pesan kebaikan (A).',
+          bobotSkor: 20,
+        },
+        {
+          nomor: 4,
+          bentuk: 'Isian Singkat',
+          stimulus: 'Lengkapilah kalimat berikut dengan imbuhan me- yang tepat!',
+          pertanyaan: 'Ustadz Ahmad sedang ... (tulis) materi adab di papan tulis.',
+          kunciJawaban: 'menulis',
+          pembahasan:
+            'Kata dasar "tulis" diawali huruf "t", ketika diberi awalan "me-", huruf t luluh menjadi "menulis".',
+          bobotSkor: 20,
+        },
+        {
+          nomor: 5,
+          bentuk: 'Uraian Bebas (HOTS)',
+          stimulus:
+            'Dalam cerita kelompok belajar, Farhan merasa sedih karena hasil menggambarnya diejek oleh temannya. Jika kamu adalah sahabat Farhan di MI Al Ihsan, bagaimana tindakan yang akan kamu lakukan dengan menerapkan prinsip Kurikulum Berbasis Cinta (kasih sayang dan akhlak mulia)?',
+          pertanyaan:
+            'Tuliskan langkah-langkah bijak yang akan kamu ambil untuk menenangkan Farhan dan menasehati teman yang mengejek!',
+          kunciJawaban:
+            'Menghibur dan memvalidasi perasaan Farhan bahwa karyanya sudah sangat bagus dan dihargai. Kemudian dengan santun mengingatkan teman yang mengejek bahwa Rasulullah SAW mengajarkan kita untuk berkata baik atau diam, serta mengajak mereka saling meminta maaf dan bekerjasama kembali.',
+          pembahasan:
+            'Jawaban dinilai berdasarkan kemampuan empati, penerapan nilai akhlak islami, dan penyelesaian konflik tanpa kekerasan.',
+          bobotSkor: 30,
+        },
+      ],
+      pedomanPenskoran: {
+        rumusNilai: 'Nilai Akhir = (Total Skor yang Diperoleh / 100) x 100',
+        rubrik: [
+          {
+            kriteria: 'Soal PG: Jawaban benar mendapat skor penuh, keliru mendapat 0.',
+            skor: '15 per butir PG',
+          },
+          {
+            kriteria: 'Soal Menjodohkan: Setiap pasangan benar mendapat skor proporsional.',
+            skor: '6.6 per pasangan',
+          },
+          {
+            kriteria: 'Soal Isian: Jawaban tepat secara ejaan dan kaidah tata bahasa.',
+            skor: '20',
+          },
+          {
+            kriteria:
+              'Soal Uraian: Refleksi mendalam, memuat solusi cinta kasih, dan bahasa santun.',
+            skor: 'Maksimal 30',
+          },
+        ],
+      },
+    };
+  }
+
+  const durationMs = Date.now() - startTime;
+  res.json({
+    success: true,
+    data: parsedResult,
+    meta: {
+      durationMs,
+      model: ai ? GEMINI_MODEL : 'Simpel-Pedagogy-Template-Engine',
+      subject,
+      topic,
+    },
+  });
+});
+
+// 6. AI Pembuat Media dan Ide Pembelajaran
+app.post('/api/ai/ide-pembelajaran', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const { subject = 'IPAS', grade = 'Kelas 4', topic = 'Wujud Zat dan Perubahannya', category = 'all' } = req.body;
+
+  const systemInstruction = `Anda adalah Inovator Media Pembelajaran Madrasah Ibtidaiyah yang kreatif, berakar pada pembelajaran kontekstual lingkungan sekitar desa Soborejo.
+Keluarkan dalam format JSON:
+{
+  "topik": "${topic}",
+  "ideAktivitas": [
+    {
+      "namaAktivitas": "string...",
+      "kategori": "Eksplorasi Lingkungan",
+      "deskripsi": "string...",
+      "alatBahan": ["string..."],
+      "langkahPelaksanaan": ["langkah 1...", "langkah 2..."],
+      "nilaiKarakter": "Gotong royong dan ketelitian"
+    }
+  ],
+  "permainanEdukatif": [
+    {
+      "namaGame": "string...",
+      "aturanMain": "string...",
+      "manfaatBelajar": "string..."
+    }
+  ],
+  "ceritaKontekstual": {
+    "judulCerita": "string...",
+    "naskahCerita": "Cerita pendek islami kontekstual untuk membuka pelajaran...",
+    "pesanMoral": "string...",
+    "pertanyaanDiskusi": ["pertanyaan 1...", "pertanyaan 2..."]
+  },
+  "ideMediaLingkungan": [
+    {
+      "namaMedia": "string...",
+      "bahanSekitar": ["botol bekas", "daun kering", "kardus bekas"],
+      "caraMembuat": "string...",
+      "caraPenggunaan": "string..."
+    }
+  ]
+}`;
+
+  let parsedResult = null;
+  let geminiError: { status: number; message: string; code: string } | null = null;
+  if (ai) {
+    try {
+      const prompt = `Berikan ide aktivitas pembelajaran, permainan edukatif, cerita kontekstual, dan alat peraga murah berbasis lingkungan untuk:
+Mata Pelajaran: ${subject}
+Kelas: ${grade}
+Topik/Materi: ${topic}
+Fokus Kategori: ${category}
+
+Keluarkan dalam format JSON terstruktur.`;
+
+      const genRes = await generateGeminiText({
+        contents: prompt,
+        systemInstruction,
+        responseMimeType: 'application/json',
+      });
+
+      if (genRes.text) {
+        parsedResult = cleanAndParseJSON(genRes.text);
+      }
+      if (!parsedResult) {
+        geminiError = { status: 502, code: 'INVALID_JSON', message: 'Respons AI tidak sesuai format JSON Ide Pembelajaran.' };
+      }
+    } catch (err: any) {
+      geminiError = formatGeminiError(err);
+      console.warn('[AI Studio] Gemini call for ide-pembelajaran failed:', geminiError.message);
+    }
+  }
+
+  if (!parsedResult && ai && geminiError) {
+    res.status(geminiError.status).json({
+      success: false,
+      code: geminiError.code,
+      message: geminiError.message,
+    });
+    return;
+  }
+
+  if (!parsedResult) {
+    parsedResult = {
+      topik: topic,
+      ideAktivitas: [
+        {
+          namaAktivitas: 'Laboratorium Alam Mini: Detektif Wujud Benda',
+          kategori: 'Eksplorasi Lingkungan Madrasah',
+          deskripsi: `Siswa diajak berkeliling halaman madrasah dan kebun warga sekitar Soborejo untuk menemukan dan mengelompokkan 5 benda padat, cair, dan gas.`,
+          alatBahan: ['Papan jalan / klip berkas', 'Kaca pembesar sederhana', 'Lembar ceklis detektif'],
+          langkahPelaksanaan: [
+            'Bagi siswa menjadi 4 tim detektif dengan nama pahlawan Islam.',
+            'Beri waktu 15 menit untuk mengamati dan mencatat penemuan di area yang ditentukan.',
+            'Kumpul kembali di teras kelas untuk mendiskusikan bagaimana perubahan suhu mengubah zat tersebut.',
+          ],
+          nilaiKarakter: 'Tadabbur alam, ketelitian, dan kerjasama antar-anggota tim.',
+        },
+      ],
+      permainanEdukatif: [
+        {
+          namaGame: 'Tebak Peran: Si Padat, Si Cair, Si Gas',
+          aturanMain:
+            'Guru menyebutkan sebuah benda (misal: "Es lilin mencair di bawah terik matahari"). Kelompok siswa harus membentuk formasi tubuh yang rapat (padat), saling memegang pundak mengalir (cair), atau berlari menyebar bebas (gas). Yang paling kompak dan cepat mendapat bintang poin.',
+          manfaatBelajar: 'Memperkuat pemahaman konsep ikatan partikel zat melalui gerakan kinestetik yang menyenangkan.',
+        },
+      ],
+      ceritaKontekstual: {
+        judulCerita: 'Berkah Hujan di Desa Soborejo',
+        naskahCerita:
+          'Sore itu di serambi Masjid Al Ihsan, gerimis turun membasahi bumi. Rayyan dan kakeknya memandangi uap hangat yang keluar dari cangkir teh kakek. "Kek, mengapa teh kakek mengeluarkan asap kecil, sedangkan air hujan di luar sangat dingin?" tanya Rayyan heran. Kakek tersenyum ramah dan menjelaskan bahwa itu adalah tanda kebesaran Allah SWT dalam siklus air dan wujud zat...',
+        pesanMoral: 'Segala perubahan alam yang diciptakan Allah SWT mengandung hikmah dan manfaat besar bagi kehidupan makhluk-Nya.',
+        pertanyaanDiskusi: [
+          'Bagaimana proses uap teh kakek bisa terjadi?',
+          'Mengapa kita harus bersyukur saat hujan turun membasahi sawah di desa kita?',
+        ],
+      },
+      ideMediaLingkungan: [
+        {
+          namaMedia: 'Termos Mini dan Siklus Air Botol Bekas',
+          bahanSekitar: ['Botol air mineral bekas 1.5 liter', 'Pewarna makanan alami/kunyit', 'Plastik pembungkus dan karet'],
+          caraMembuat:
+            'Isi botol dengan air berwarna 1/4 bagian, tutup rapat, dan letakkan di bawah sinar matahari di dekat jendela kelas.',
+          caraPenggunaan:
+            'Siswa mengamati proses evaporasi (penguapan) dan kondensasi (tetes embun di dinding botol) sebagai simulasi nyata hujan.',
+        },
+      ],
+    };
+  }
+
+  const durationMs = Date.now() - startTime;
+  res.json({
+    success: true,
+    data: parsedResult,
+    meta: {
+      durationMs,
+      model: ai ? GEMINI_MODEL : 'Simpel-Pedagogy-Template-Engine',
+      subject,
+      topic,
+    },
+  });
+});
+
+// 7. AI Asisten Refleksi Guru
+app.post('/api/ai/refleksi-guru', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const {
+    subject = 'Matematika',
+    grade = 'Kelas 4',
+    topic = 'Pecahan Senilai',
+    journalNotes = 'Saat diajarkan dengan garis bilangan, beberapa siswa tampak bingung dan kurang fokus. Suasana kelas agak gaduh ketika latihan mandiri.',
+    studentResponse = 'Siswa laki-laki cenderung cepat bosan, sedangkan siswi perempuan lebih teliti namun lambat menyelesaikan soal.',
+  } = req.body;
+
+  const systemInstruction = `Anda adalah Konsultan Ahli Supervisi Klinis dan Pedagogik Guru Madrasah.
+Tugas Anda adalah membaca catatan jurnal mengajar guru dan memberikan analisis reflektif yang membangun tanpa menghakimi.
+Keluarkan format JSON:
+{
+  "ringkasanKbm": "string...",
+  "identifikasiKendala": ["string...", "string..."],
+  "analisisPenyebab": ["string...", "string..."],
+  "alternatifSolusi": [
+    {"area": "Diferensiasi Pembelajaran", "rekomendasi": "string..."},
+    {"area": "Manajemen Kelas", "rekomendasi": "string..."}
+  ],
+  "rencanaPerbaikan": [
+    {"langkah": "string...", "waktuTarget": "Pertemuan berikutnya", "indikatorKeberhasilan": "string..."}
+  ],
+  "rekomendasiPendekatanCinta": "Saran penerapan kasih sayang dan keteladanan yang menentramkan murid..."
+}`;
+
+  let parsedResult = null;
+  let geminiError: { status: number; message: string; code: string } | null = null;
+  if (ai) {
+    try {
+      const prompt = `Analisis refleksi mengajar guru berikut:
+Mata Pelajaran: ${subject}
+Kelas: ${grade}
+Topik/Materi: ${topic}
+Catatan Jurnal Guru: ${journalNotes}
+Respon & Kondisi Siswa: ${studentResponse}
+
+Berikan panduan solutif yang berorientasi pada pendekatan Kurikulum Berbasis Cinta dan Pembelajaran Mendalam. Format JSON.`;
+
+      const genRes = await generateGeminiText({
+        contents: prompt,
+        systemInstruction,
+        responseMimeType: 'application/json',
+      });
+
+      if (genRes.text) {
+        parsedResult = cleanAndParseJSON(genRes.text);
+      }
+      if (!parsedResult) {
+        geminiError = { status: 502, code: 'INVALID_JSON', message: 'Respons AI tidak sesuai format JSON Refleksi Guru.' };
+      }
+    } catch (err: any) {
+      geminiError = formatGeminiError(err);
+      console.warn('[AI Studio] Gemini call for refleksi-guru failed:', geminiError.message);
+    }
+  }
+
+  if (!parsedResult && ai && geminiError) {
+    res.status(geminiError.status).json({
+      success: false,
+      code: geminiError.code,
+      message: geminiError.message,
+    });
+    return;
+  }
+
+  if (!parsedResult) {
+    parsedResult = {
+      ringkasanKbm: `Pembelajaran ${subject} kelas ${grade} dengan materi ${topic} telah terlaksana, namun terdapat dinamika kesiapan belajar yang bervariasi antara siswa yang membutuhkan pendekatan konkret dengan yang telah siap secara abstrak.`,
+      identifikasiKendala: [
+        'Konsep garis bilangan terasa terlalu abstrak bagi siswa yang masih dalam tahap perkembangan operasional konkret (karakteristik khas usia MI/SD kelas 4).',
+        'Latihan mandiri yang monoton tanpa media manipulatif memicu kejenuhan pada peserta didik berenergi tinggi (kinestetik).',
+        'Perbedaan tempo belajar menyebabkan jeda waktu yang memicu kegaduhan di kelas.',
+      ],
+      analisisPenyebab: [
+        'Model pembelajaran belum sepenuhnya menerapkan fase "Mindful" dan "Joyful Learning" dengan alat peraga manipulatif konkret (seperti kertas lipat origami atau balok pecahan warna).',
+        'Belum tersedianya variasi tugas bertingkat (tiered assignment) bagi siswa yang selesai lebih cepat.',
+      ],
+      alternatifSolusi: [
+        {
+          area: 'Penggunaan Media Manipulatif',
+          rekomendasi:
+            'Gunakan kertas lipat origami berwarna atau kue bolu potong untuk memperagakan konsep pecahan senilai sebelum masuk ke garis bilangan.',
+        },
+        {
+          area: 'Manajemen Kelas Berbasis Cinta',
+          rekomendasi:
+            'Tunjuk siswa yang sudah mahir menjadi "Duta Sahabat Belajar" untuk membantu mendampingi rekannya dengan penuh kelembutan (peer tutoring).',
+        },
+        {
+          area: 'Diferensiasi Proses',
+          rekomendasi:
+            'Bagi kelas menjadi dua stasiun: Stasiun Konkret (didampingi guru dengan benda nyata) dan Stasiun Aplikasi (mandiri/kelompok).',
+        },
+      ],
+      rencanaPerbaikan: [
+        {
+          langkah: 'Menyiapkan media kertas lipat dan lembar kerja bergambar untuk sesi review pecahan senilai.',
+          waktuTarget: 'Pertemuan pekan depan',
+          indikatorKeberhasilan: 'Minimal 85% siswa mampu menunjukkan pecahan 1/2 senilai dengan 2/4 menggunakan kertas lipat tanpa ragu.',
+        },
+        {
+          langkah: 'Menerapkan afirmasi dan ice-breaking "Tepuk Fokus" saat transisi dari instruksi ke latihan mandiri.',
+          waktuTarget: 'Setiap awal dan pertengahan KBM',
+          indikatorKeberhasilan: 'Suasana kelas kondusif dan siswa antusias dalam mengerjakan tugas.',
+        },
+      ],
+      rekomendasiPendekatanCinta:
+        'Sapa siswa yang tampak gelisah dengan panggilan sayang, hindari teguran bernada tinggi. Sentuh pundak mereka secara kebapakan/keibuan, dan berikan penguatan: "Bapak/Ibu yakin kamu pasti bisa, mari kita coba sekali lagi bersama-sama ya nak."',
+    };
+  }
+
+  const durationMs = Date.now() - startTime;
+  res.json({
+    success: true,
+    data: parsedResult,
+    meta: {
+      durationMs,
+      model: ai ? GEMINI_MODEL : 'Simpel-Pedagogy-Template-Engine',
+      subject,
+      topic,
+    },
+  });
+});
+
+// 8. AI Analisis Hasil Belajar
+app.post('/api/ai/analisis-belajar', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const {
+    subject = 'Bahasa Indonesia',
+    grade = 'Kelas 4',
+    topic = 'Sumatif Lingkup Materi 1',
+    kktp = 75,
+    totalStudents = 24,
+    averageScore = 78.5,
+    highestScore = 95,
+    lowestScore = 60,
+    passCount = 19,
+    remedialCount = 5,
+    passPercentage = 79.2,
+    unachievedObjectives = ['Menentukan kalimat transitif dan intransitif', 'Menemukan ide pokok paragraf ketiga'],
+  } = req.body;
+
+  const systemInstruction = `Anda adalah Ahli Analitik Data Akademik dan Spesialis Remedial Kurikulum Merdeka Madrasah.
+PENTING: Jangan menghitung ulang angka-angka statistik. Gunakan persis angka yang sudah dihitung oleh aplikasi.
+Tugas Anda adalah memberikan interpretasi kualitatif, mendiagnosis letak kesulitan belajar, merumuskan program remedial yang terarah, ide pengayaan bermutu, dan narasi evaluasi untuk laporan wali kelas/kepala madrasah.
+Keluarkan format JSON:
+{
+  "ringkasanStatistik": {
+    "rataRata": ${averageScore},
+    "tuntasCount": ${passCount},
+    "belumTuntasCount": ${remedialCount},
+    "persentaseTuntas": ${passPercentage},
+    "statusKelas": "Baik"
+  },
+  "interpretasiKualitatif": "string...",
+  "analisisTujuanBelumTercapai": ["string...", "string..."],
+  "rekomendasiRemedial": [
+    {"kelompokSiswa": "Kelompok Perlu Bimbingan Konseptual", "kegiatan": "string...", "metode": "Tutor sebaya / bimbingan kelompok kecil"}
+  ],
+  "rekomendasiPengayaan": [
+    {"kelompokSiswa": "Kelompok Mahir (Skor > 85)", "kegiatanTantangan": "string..."}
+  ],
+  "narasiEvaluasiGuru": "Paragraf narasi evaluasi profesional untuk buku rapor atau laporan kepala madrasah..."
+}`;
+
+  let parsedResult = null;
+  let geminiError: { status: number; message: string; code: string } | null = null;
+  if (ai) {
+    try {
+      const prompt = `Analisis data hasil asesmen siswa berikut:
+Mata Pelajaran: ${subject}
+Kelas: ${grade}
+Topik/Asesmen: ${topic}
+Nilai KKTP Madrasah: ${kktp}
+Jumlah Siswa: ${totalStudents} orang
+Rata-rata Kelas: ${averageScore}
+Nilai Tertinggi: ${highestScore}
+Nilai Terendah: ${lowestScore}
+Jumlah Siswa Tuntas: ${passCount} orang (${passPercentage}%)
+Jumlah Siswa Butuh Remedial: ${remedialCount} orang
+Tujuan Pembelajaran yang Belum Tuntas: ${unachievedObjectives.join(', ')}
+
+Berikan interpretasi kualitatif, program tindak lanjut remedial & pengayaan, dan narasi evaluasi resmi. Format JSON.`;
+
+      const genRes = await generateGeminiText({
+        contents: prompt,
+        systemInstruction,
+        responseMimeType: 'application/json',
+      });
+
+      if (genRes.text) {
+        parsedResult = cleanAndParseJSON(genRes.text);
+      }
+      if (!parsedResult) {
+        geminiError = { status: 502, code: 'INVALID_JSON', message: 'Respons AI tidak sesuai format JSON Analisis Belajar.' };
+      }
+    } catch (err: any) {
+      geminiError = formatGeminiError(err);
+      console.warn('[AI Studio] Gemini call for analisis-belajar failed:', geminiError.message);
+    }
+  }
+
+  if (!parsedResult && ai && geminiError) {
+    res.status(geminiError.status).json({
+      success: false,
+      code: geminiError.code,
+      message: geminiError.message,
+    });
+    return;
+  }
+
+  if (!parsedResult) {
+    parsedResult = {
+      ringkasanStatistik: {
+        rataRata: averageScore,
+        tuntasCount: passCount,
+        belumTuntasCount: remedialCount,
+        persentaseTuntas: passPercentage,
+        statusKelas: passPercentage >= 85 ? 'Sangat Baik' : passPercentage >= 75 ? 'Baik' : 'Perlu Pendampingan Khusus',
+      },
+      interpretasiKualitatif: `Pencapaian ketuntasan klasikal kelas ${grade} pada asesmen ${topic} telah mencapai ${passPercentage}%, melampaui ambang batas KKTP madrasah (${kktp}). Mayoritas peserta didik (19 dari 24 siswa) telah menunjukkan pemahaman yang matang. Namun demikian, terdapat disparitas rentang nilai antara nilai tertinggi (${highestScore}) dan nilai terendah (${lowestScore}) yang memerlukan perhatian pada aspek diferensiasi proses.`,
+      analisisTujuanBelumTercapai: unachievedObjectives.length > 0 ? unachievedObjectives : [
+        'Membedakan kalimat transitif dan intransitif pada teks narasi kompleks.',
+        'Menganalisis ide pokok tersirat pada paragraf narasi panjang.',
+      ],
+      rekomendasiRemedial: [
+        {
+          kelompokSiswa: `Siswa Belum Tuntas (${remedialCount} Siswa)`,
+          kegiatan:
+            'Klinik Belajar Khusus: Menggunakan kartu kata berwarna untuk membedakan Subjek, Predikat, dan Objek secara visual sebelum masuk ke tes ulang terstruktur.',
+          metode: 'Pendampingan langsung oleh guru dalam kelompok kecil (Small Group Direct Instruction) pada jam tambahan madrasah.',
+        },
+      ],
+      rekomendasiPengayaan: [
+        {
+          kelompokSiswa: 'Siswa Berkemampuan Tinggi / Mahir (Skor di atas 85)',
+          kegiatanTantangan:
+            'Menjadi Duta Literasi: Menulis naskah cerita fabel mini bertema adab islami dan membacakannya di hadapan teman-teman sekelas.',
+        },
+      ],
+      narasiEvaluasiGuru: `Secara umum, proses pembelajaran ${subject} materi ${topic} di kelas ${grade} berjalan efektif dengan capaian ketuntasan ${passPercentage}%. Sebanyak ${passCount} siswa telah memenuhi kriteria ketercapaian tujuan pembelajaran (KKTP). Bagi ${remedialCount} siswa yang memerlukan pendampingan remedial, guru telah merancang intervensi pembelajaran bermakna agar seluruh anak dapat mencapai potensi terbaiknya dengan bahagia dan percaya diri.`,
+    };
+  }
+
+  const durationMs = Date.now() - startTime;
+  res.json({
+    success: true,
+    data: parsedResult,
+    meta: {
+      durationMs,
+      model: ai ? GEMINI_MODEL : 'Simpel-Pedagogy-Template-Engine',
+      subject,
+      topic,
+    },
+  });
+});
+
+// 9. AI Asisten Kepala Madrasah
+app.post('/api/ai/kepala-madrasah', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const {
+    academicYear = '2024/2025',
+    semester = 'Ganjil',
+    periodType = 'tengah_semester',
+    stats = {
+      totalTeachers: 12,
+      compliancePercent: 91.5,
+      avgStudentAttendance: 96.2,
+      supervisionCompletedCount: 9,
+      supervisionNeedFollowupCount: 2,
+      averageSchoolScore: 82.4,
+    },
+    focusConcern = 'Peningkatan implementasi Deep Learning dan pemantauan tindak lanjut supervisi akademik.',
+  } = req.body;
+
+  const systemInstruction = `Anda adalah Asisten Strategis dan Konsultan Penjaminan Mutu Kepala Madrasah Ibtidaiyah.
+Tugas Anda adalah merangkum kondisi akademik madrasah, menganalisis data kehadiran dan supervisi, serta menyusun materi briefing rapat dewan guru.
+Sertakan dasar data yang digunakan, periode analisis, dan batasan interpretasinya.
+Keluarkan format JSON:
+{
+  "periodeAnalisis": "Semester ${semester} Tahun Ajaran ${academicYear}",
+  "dasarDataDigunakan": ["Rekap Jurnal & Presensi Siswa", "Log Supervisi Akademik Kepala Madrasah", "Data Portofolio Perangkat Ajar Guru"],
+  "ringkasanEksekutif": "string...",
+  "analisisKehadiranSiswa": {
+    "kondisi": "string...",
+    "tren": "string...",
+    "rekomendasiTindakLanjut": "string..."
+  },
+  "evaluasiAdministrasiGuru": {
+    "tingkatKepatuhan": "string...",
+    "catatanKelengkapan": "string..."
+  },
+  "evaluasiSupervisiKbm": {
+    "aspekKuat": ["string...", "string..."],
+    "aspekPerluPerbaikan": ["string...", "string..."]
+  },
+  "rekomendasiPeningkatanMutu": ["string...", "string..."],
+  "poinArahanRapatDewanGuru": ["string...", "string...", "string..."],
+  "batasanInterpretasi": "Data dianalisis berdasarkan laporan operasional SIMPEL MI Al Ihsan sampai dengan tanggal analisis..."
+}`;
+
+  let parsedResult = null;
+  let geminiError: { status: number; message: string; code: string } | null = null;
+  if (ai) {
+    try {
+      const prompt = `Analisis kondisi akademik MI Ma'arif Al Ihsan Soborejo:
+Periode: Semester ${semester} T.A. ${academicYear} (${periodType})
+Data Metrik:
+- Jumlah Guru: ${stats.totalTeachers} orang
+- Kepatuhan Perangkat Ajar: ${stats.compliancePercent}%
+- Rata-rata Kehadiran Siswa: ${stats.avgStudentAttendance}%
+- Supervisi Terlaksana: ${stats.supervisionCompletedCount} guru
+- Guru Memerlukan Tindak Lanjut Supervisi: ${stats.supervisionNeedFollowupCount} orang
+- Rata-rata Nilai Akademik Madrasah: ${stats.averageSchoolScore}
+Fokus Perhatian: ${focusConcern}
+
+Susun telaah manajerial dan draf arahan rapat dewan guru. Format JSON.`;
+
+      const genRes = await generateGeminiText({
+        contents: prompt,
+        systemInstruction,
+        responseMimeType: 'application/json',
+      });
+
+      if (genRes.text) {
+        parsedResult = cleanAndParseJSON(genRes.text);
+      }
+      if (!parsedResult) {
+        geminiError = { status: 502, code: 'INVALID_JSON', message: 'Respons AI tidak sesuai format JSON Asisten Kepala Madrasah.' };
+      }
+    } catch (err: any) {
+      geminiError = formatGeminiError(err);
+      console.warn('[AI Studio] Gemini call for kepala-madrasah failed:', geminiError.message);
+    }
+  }
+
+  if (!parsedResult && ai && geminiError) {
+    res.status(geminiError.status).json({
+      success: false,
+      code: geminiError.code,
+      message: geminiError.message,
+    });
+    return;
+  }
+
+  if (!parsedResult) {
+    parsedResult = {
+      periodeAnalisis: `Semester ${semester} Tahun Ajaran ${academicYear} (${periodType === 'tengah_semester' ? 'Evaluasi Tengah Semester' : 'Evaluasi Akhir Semester'})`,
+      dasarDataDigunakan: [
+        'Data Presensi Siswa Harian Terverifikasi (Tingkat kehadiran 96.2%)',
+        'Portofolio Perangkat Pembelajaran Guru di SIMPEL (Kepatuhan 91.5%)',
+        'Instrumen Observasi Supervisi Akademik Guru Kelas & Mapel (9 Guru tersupervisi)',
+        'Hasil Pengawasan Asesmen Sumatif Lingkup Materi dan STS',
+      ],
+      ringkasanEksekutif: `Kondisi pembelajaran di MI Ma’arif Al Ihsan Soborejo menunjukkan stabilitas yang sangat baik dengan tingkat kehadiran siswa mencapai ${stats.avgStudentAttendance}% dan rata-rata nilai akademik ${stats.averageSchoolScore}. Kepatuhan guru dalam mengunggah CP, TP, ATP, dan Modul Ajar telah menyentuh angka ${stats.compliancePercent}%. Prioritas perbaikan diarahkan pada penguatan diferensiasi belajar dan penuntasan tindak lanjut 2 guru hasil supervisi klinis.`,
+      analisisKehadiranSiswa: {
+        kondisi: 'Tingkat kehadiran siswa berada di atas target madrasah (95%), dengan angka sakit dan izin terdistribusi wajar.',
+        tren: 'Kehadiran hari Senin dan Jumat relatif stabil, menunjukkan iklim madrasah yang dirindukan dan menyenangkan bagi peserta didik.',
+        rekomendasiTindakLanjut:
+          'Pertahankan sistem presensi harian berbasis SIMPEL dan koordinasikan dengan wali kelas untuk siswa yang memiliki catatan ketidakhadiran lebih dari 3 hari beruntun.',
+      },
+      evaluasiAdministrasiGuru: {
+        tingkatKepatuhan: `${stats.compliancePercent}% (Sangat Baik / Hijau)`,
+        catatanKelengkapan:
+          'Mayoritas perangkat pembelajaran telah memuat integrasi Kurikulum Merdeka dan Kurikulum Berbasis Cinta. Modul ajar pada Fase B dan C telah memuat rubrik asesmen yang terukur.',
+      },
+      evaluasiSupervisiKbm: {
+        aspekKuat: [
+          'Suasana kelas ramah anak dengan salam santun dan afirmasi cinta di awal KBM.',
+          'Pemanfaatan lingkungan sekitar desa Soborejo sebagai sumber belajar kontekstual.',
+          'Pemberian apresiasi verbal yang menumbuhkan rasa percaya diri murid.',
+        ],
+        aspekPerluPerbaikan: [
+          'Sebagian guru masih dominan menggunakan metode ceramah satu arah pada fase inti.',
+          'Instrumen asesmen formatif belum seluruhnya terdokumentasi rapi dalam buku nilai harian.',
+        ],
+      },
+      rekomendasiPeningkatanMutu: [
+        'Adakan sesi berbagi praktik baik (In-House Training mini) seputar pendekatan Mindful dan Joyful Learning pada rapat dewan guru.',
+        'Lakukan pendampingan sejawat (peer mentoring) untuk memfasilitasi 2 guru yang memerlukan penguatan asesmen diferensiasi.',
+        'Integrasikan literasi Al-Qur’an dan pembiasaan sholat dhuha berjamaah secara konsisten sebagai ruh Kurikulum Berbasis Cinta.',
+      ],
+      poinArahanRapatDewanGuru: [
+        'Apresiasi tinggi kepada seluruh Bapak/Ibu Guru atas dedikasi dan kelengkapan administrasi yang mencapai 91.5%.',
+        'Penegasan komitmen: Madrasah kita adalah rumah kedua bagi anak-anak; kedepankan keteladanan akhlak dan kelembutan dalam mendidik.',
+        'Pengingat jadwal penyusunan Kisi-kisi dan Soal Sumatif yang harus diverifikasi sebelum digandakan.',
+        'Dorongan untuk memanfaatkan fitur AI Asisten SIMPEL dalam memperkaya ide permainan edukatif dan modul ajar agar pembelajaran semakin bermakna.',
+      ],
+      batasanInterpretasi:
+        'Laporan analisis ini disusun berdasarkan agregasi data yang terekam dalam pangkalan data SIMPEL MI Al Ihsan. Kepala Madrasah tetap memegang diskresi kepemimpinan mutlak dalam pengambilan kebijakan operasional madrasah.',
+    };
+  }
+
+  const durationMs = Date.now() - startTime;
+  res.json({
+    success: true,
+    data: parsedResult,
+    meta: {
+      durationMs,
+      model: ai ? GEMINI_MODEL : 'Simpel-Pedagogy-Template-Engine',
+      academicYear,
+      semester,
+    },
+  });
+});
+
+// 10. AI Asisten SIMPEL - Tanya Jawab Interaktif
+app.post('/api/ai/chat', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const { messages = [] } = req.body;
+
+  const systemInstruction = `Anda adalah "Asisten SIMPEL", asisten kecerdasan buatan cerdas, santun, dan inspiratif untuk MI Ma’arif Al Ihsan Soborejo.
+Tugas Anda:
+1. Menjawab pertanyaan pengguna seputar:
+   - Penggunaan dan alur kerja aplikasi SIMPEL (Sistem Informasi Manajemen Pembelajaran).
+   - Administrasi pembelajaran guru (CP, TP, ATP, Modul Ajar, LKPD, Jurnal Mengajar, Supervisi).
+   - Kurikulum Merdeka tingkat Madrasah Ibtidaiyah (Kemenag & Kemendikbudristek).
+   - Pembelajaran Mendalam (Deep Learning: Mindful, Meaningful, Joyful).
+   - Kurikulum Berbasis Cinta (KBC: Kasih Sayang, Keteladanan, Keberagaman, Adab & Akhlak Mulia).
+   - Strategi asesmen, evaluasi, kisi-kisi soal HOTS, dan program remedial/pengayaan.
+2. Gunakan Bahasa Indonesia yang jelas, hangat, santun, dan bernuansa islami ramah.
+3. JANGAN MENGARANG informasi regulasi resmi. Jika ada kebijakan yang belum pasti atau butuh persetujuan kepala madrasah, sampaikan dengan jujur keterbatasannya.
+4. Jangan meminta data pribadi sensitif siswa (NIK, nomor kartu keluarga, dll).`;
+
+  let replyText = '';
+  let geminiError: { status: number; message: string; code: string } | null = null;
+  if (ai) {
+    try {
+      const structuredContents = Array.isArray(messages) && messages.length > 0
+        ? messages.map((m: any) => ({
+            role: m?.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: String(m?.content || '') }],
+          }))
+        : [{ role: 'user', parts: [{ text: 'Halo' }] }];
+
+      const genRes = await generateGeminiText({
+        contents: structuredContents,
+        systemInstruction,
+      });
+
+      if (genRes.text) {
+        replyText = genRes.text;
+      } else {
+        geminiError = { status: 502, code: 'EMPTY_RESPONSE', message: 'Gemini AI mengembalikan jawaban kosong.' };
+      }
+    } catch (err: any) {
+      geminiError = formatGeminiError(err);
+      console.warn('[AI Studio] Gemini call for chat failed:', geminiError.message);
+    }
+  }
+
+  if (!replyText && ai && geminiError) {
+    res.status(geminiError.status).json({
+      success: false,
+      code: geminiError.code,
+      message: geminiError.message,
+    });
+    return;
+  }
+
+  if (!replyText) {
+    const lastMsg = (messages[messages.length - 1]?.content || '').toLowerCase();
+    if (lastMsg.includes('modul ajar') || lastMsg.includes('rpp')) {
+      replyText = `Assalamu’alaikum Warahmatullahi Wabarakatuh.
+Untuk menyusun Modul Ajar Kurikulum Merdeka di SIMPEL MI Al Ihsan, Anda dapat memanfaatkan menu **Asisten AI > Penyusun Modul Ajar**.
+Pastikan Anda memilih mata pelajaran, fase/kelas, serta topik materi. Modul Ajar yang dihasilkan telah memadukan tiga pilar utama:
+1. **Mindful Learning**: Membangun fokus dan kesadaran diri siswa sebelum belajar.
+2. **Meaningful Learning**: Menghubungkan konsep dengan kehidupan nyata di Soborejo.
+3. **Joyful Learning**: Aktivitas interaktif dan permainan edukasi yang menggembirakan.
+Hasil Modul Ajar dapat langsung Anda edit, diekspor ke Word (.docx) atau PDF, dan diajukan ke Kepala Madrasah untuk ditelaah. Apakah ada hal spesifik yang ingin Bapak/Ibu diskusikan?`;
+    } else if (lastMsg.includes('cinta') || lastMsg.includes('kbc')) {
+      replyText = `Kurikulum Berbasis Cinta (KBC) di MI Ma’arif Al Ihsan Soborejo menempatkan kasih sayang, keteladanan (uswah hasanah), dan adab sebagai ruh utama pembelajaran. 
+Dalam praktiknya:
+- Guru menyapa siswa dengan senyuman dan menanyakan kondisi perasaan mereka.
+- Kesalahan murid dalam belajar dipandang sebagai proses berkembang, bukan aib untuk dimarahi.
+- Mengedepankan disiplin positif dan saling menghargai perbedaan latar belakang setiap anak.`;
+    } else if (lastMsg.includes('remedial') || lastMsg.includes('nilai')) {
+      replyText = `Pada Kurikulum Merdeka, kegiatan remedial difokuskan pada Tujuan Pembelajaran (TP) yang belum tuntas, bukan mengulang seluruh bab dari awal.
+Di menu **Asisten AI > Analisis Hasil Belajar**, sistem SIMPEL secara otomatis menghitung rata-rata kelas, tingkat ketuntasan KKTP, dan merekomendasikan metode remedial (seperti bimbingan kelompok kecil atau tutor sebaya) serta program pengayaan bagi siswa yang telah mahir.`;
+    } else {
+      replyText = `Assalamu’alaikum Warahmatullahi Wabarakatuh.
+Saya adalah **Asisten SIMPEL**, siap mendampingi Bapak/Ibu Guru dan Pimpinan MI Ma’arif Al Ihsan Soborejo.
+Saya dapat membantu dalam:
+- Penyusunan perangkat ajar (Modul Ajar, LKPD, Ide Belajar).
+- Pembuatan kisi-kisi dan butir soal asesmen (Literasi, Numerasi, HOTS).
+- Refleksi jurnal mengajar dan solusi dinamika kelas.
+- Analisis hasil belajar dan rekomendasi remedial/pengayaan.
+- Penjelasan alur fitur pada aplikasi SIMPEL.
+
+Ada yang bisa saya bantu hari ini untuk mempermudah kegiatan belajar mengajar Bapak/Ibu?`;
+    }
+  }
+
+  const durationMs = Date.now() - startTime;
+  res.json({
+    success: true,
+    message: {
+      id: `msg-${Date.now()}`,
+      role: 'assistant',
+      content: replyText,
+      timestamp: new Date().toISOString(),
+    },
+    meta: {
+      durationMs,
+      model: ai ? GEMINI_MODEL : 'Simpel-Pedagogy-Template-Engine',
+    },
+  });
+});
+
+// ==========================================
+// GOOGLE APPS SCRIPT PROXY (UPLOAD TANPA LOGIN)
+// ==========================================
+const DEFAULT_DRIVE_OWNER_EMAIL = 'alihsansoborejo@gmail.com';
+
+interface ServerDriveConfig {
+  sharedFolderUrl: string;
+  appsScriptWebhookUrl: string;
+  driveFolderName: string;
+  ownerEmail: string;
+  autoUploadToDrive: boolean;
+  activatedBy?: string;
+  activatedAt?: string;
+  lastTestAt?: string;
+  lastTestStatus?: 'connected' | 'error';
+  lastTestMessage?: string;
+}
+
+function loadServerDriveConfig(): ServerDriveConfig {
+  const envUrl = String(process.env.GOOGLE_APPS_SCRIPT_URL || '').trim();
+  const base: ServerDriveConfig = {
+    sharedFolderUrl: 'https://drive.google.com',
+    appsScriptWebhookUrl: isValidAppsScriptUrl(envUrl) ? envUrl : '',
+    driveFolderName: 'SIMPEL MI Al Ihsan Soborejo',
+    ownerEmail: DEFAULT_DRIVE_OWNER_EMAIL,
+    autoUploadToDrive: isValidAppsScriptUrl(envUrl),
+  };
+
+  try {
+    ensureDataDir();
+    if (fs.existsSync(DRIVE_CONFIG_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(DRIVE_CONFIG_FILE, 'utf-8'));
+      if (parsed && typeof parsed === 'object') {
+        Object.assign(base, parsed);
+      }
+    }
+  } catch (err) {
+    console.warn('[Drive Config] Gagal membaca drive-config.json:', err);
+  }
+
+  // Cek juga syncState['simpel_drive_storage_config_v1'] bila ada
+  const syncRaw = syncState.entries['simpel_drive_storage_config_v1']?.value;
+  if (syncRaw) {
+    try {
+      const parsedSync = JSON.parse(syncRaw);
+      if (parsedSync && typeof parsedSync === 'object') {
+        const syncUrl = String(parsedSync.appsScriptWebhookUrl || '').trim();
+        const baseTs = Math.max(
+          base.activatedAt ? Date.parse(base.activatedAt) || 0 : 0,
+          base.lastTestAt ? Date.parse(base.lastTestAt) || 0 : 0
+        );
+        const syncTs = Math.max(
+          parsedSync.activatedAt ? Date.parse(parsedSync.activatedAt) || 0 : 0,
+          parsedSync.lastTestAt ? Date.parse(parsedSync.lastTestAt) || 0 : 0
+        );
+        if (isValidAppsScriptUrl(syncUrl) && (!base.appsScriptWebhookUrl || syncTs > baseTs)) {
+          base.appsScriptWebhookUrl = syncUrl;
+          base.autoUploadToDrive = parsedSync.autoUploadToDrive !== false;
+          if (parsedSync.activatedAt) base.activatedAt = String(parsedSync.activatedAt);
+          if (parsedSync.activatedBy) base.activatedBy = String(parsedSync.activatedBy);
+          if (parsedSync.lastTestAt) base.lastTestAt = String(parsedSync.lastTestAt);
+          if (parsedSync.lastTestStatus) base.lastTestStatus = parsedSync.lastTestStatus;
+          if (parsedSync.lastTestMessage) base.lastTestMessage = String(parsedSync.lastTestMessage);
+        }
+        if (parsedSync.sharedFolderUrl && (!base.sharedFolderUrl || base.sharedFolderUrl === 'https://drive.google.com')) {
+          base.sharedFolderUrl = String(parsedSync.sharedFolderUrl).trim();
+        }
+        if (parsedSync.driveFolderName && (!base.driveFolderName || syncTs > baseTs)) {
+          base.driveFolderName = String(parsedSync.driveFolderName).trim();
+        }
+      }
+    } catch {
+      // ignore invalid JSON in sync state
+    }
+  }
+
+  if (!base.appsScriptWebhookUrl && isValidAppsScriptUrl(envUrl)) {
+    base.appsScriptWebhookUrl = envUrl;
+    base.autoUploadToDrive = true;
+  }
+  base.ownerEmail = base.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL;
+  return base;
+}
+
+function saveServerDriveConfig(patch: Partial<ServerDriveConfig>): ServerDriveConfig {
+  const current = loadServerDriveConfig();
+  const next: ServerDriveConfig = {
+    ...current,
+    ...patch,
+    ownerEmail: String(patch.ownerEmail || current.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL).trim(),
+    driveFolderName: String(patch.driveFolderName || current.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo').trim(),
+    sharedFolderUrl: String(patch.sharedFolderUrl || current.sharedFolderUrl || 'https://drive.google.com').trim(),
+    appsScriptWebhookUrl: String(
+      patch.appsScriptWebhookUrl !== undefined ? patch.appsScriptWebhookUrl : current.appsScriptWebhookUrl || ''
+    ).trim(),
+  };
+
+  try {
+    ensureDataDir();
+    const tmp = `${DRIVE_CONFIG_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf-8');
+    fs.renameSync(tmp, DRIVE_CONFIG_FILE);
+  } catch (err) {
+    console.error('[Drive Config] Gagal menyimpan drive-config.json:', err);
+  }
+
+  // Broadcast ke seluruh perangkat yang sedang terhubung lewat sync engine
+  applySyncMutations('server-drive-config', [
+    {
+      key: 'simpel_drive_storage_config_v1',
+      value: JSON.stringify(next),
+      updatedAt: new Date().toISOString(),
+    },
+  ]);
+
+  return next;
+}
+
+function isValidAppsScriptUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    return (
+      parsed.protocol === 'https:' &&
+      (parsed.hostname === 'script.google.com' || parsed.hostname === 'script.googleusercontent.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function callAppsScriptWebApp(webhookUrl: string, payload: Record<string, any>) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 55000);
+
+  let upstreamRes: globalThis.Response;
+  try {
+    upstreamRes = await fetch(webhookUrl.trim(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify(payload),
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error(
+        'Koneksi ke Google Apps Script melebihi batas waktu (55 detik). Coba unggah berkas dengan ukuran lebih kecil atau ulangi beberapa saat lagi.'
+      );
+    }
+    throw new Error(`Gagal menghubungi Google Apps Script: ${err?.message || 'Koneksi jaringan terputus.'}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const rawText = await upstreamRes.text();
+  const trimmed = rawText.trim();
+
+  if (!trimmed) {
+    throw new Error(
+      `Google Apps Script mengembalikan respons kosong (HTTP ${upstreamRes.status}). Kemungkinan ukuran berkas terlalu besar atau waktu eksekusi skrip habis.`
+    );
+  }
+
+  if (
+    upstreamRes.status === 401 ||
+    upstreamRes.status === 403 ||
+    trimmed.startsWith('<') ||
+    trimmed.toLowerCase().includes('<!doctype html') ||
+    trimmed.toLowerCase().includes('accounts.google.com') ||
+    trimmed.toLowerCase().includes('access denied')
+  ) {
+    const isForbidden =
+      upstreamRes.status === 401 ||
+      upstreamRes.status === 403 ||
+      trimmed.toLowerCase().includes('access denied') ||
+      trimmed.toLowerCase().includes('you need access');
+    throw new Error(
+      isForbidden
+        ? 'Google Apps Script menolak akses tanpa login (HTTP 403 / Access Denied). Jika sebelumnya di-deploy memakai akun belajar.id atau Google Workspace sekolah, domain Workspace umumnya memblokir akses publik ("Anyone"). Solusi: Deploy ulang skrip memakai akun @gmail.com biasa (mis. alihsansoborejo@gmail.com) dengan Execute as = "Me" dan Who has access = "Anyone" (Siapa saja).'
+        : 'Web App Google Apps Script mengembalikan halaman HTML/login Google. Pastikan saat Deploy > New deployment di script.google.com memakai akun @gmail.com biasa, Execute as disetel ke "Me" dan Who has access disetel ke "Anyone" (Siapa saja).'
+    );
+  }
+
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error(
+      `Respons Google Apps Script bukan JSON valid (HTTP ${upstreamRes.status}): ${trimmed.slice(0, 180)}`
+    );
+  }
+
+  if (!upstreamRes.ok || parsed?.status === 'error') {
+    throw new Error(parsed?.message || `Google Apps Script gagal (HTTP ${upstreamRes.status}).`);
+  }
+
+  return parsed;
+}
+
+app.get('/api/drive/config', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  const cfg = loadServerDriveConfig();
+  const configured = isValidAppsScriptUrl(cfg.appsScriptWebhookUrl) && cfg.autoUploadToDrive !== false;
+  res.json({
+    success: true,
+    configured,
+    healthy: configured && cfg.lastTestStatus !== 'error',
+    config: cfg,
+  });
+});
+
+app.post('/api/drive/config', (req: Request, res: Response) => {
+  const incoming = req.body?.config || req.body || {};
+  const saved = saveServerDriveConfig({
+    sharedFolderUrl: incoming.sharedFolderUrl,
+    appsScriptWebhookUrl: incoming.appsScriptWebhookUrl,
+    driveFolderName: incoming.driveFolderName,
+    ownerEmail: incoming.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
+    autoUploadToDrive: incoming.autoUploadToDrive,
+    activatedBy: incoming.activatedBy,
+    activatedAt: incoming.activatedAt,
+    lastTestAt: incoming.lastTestAt,
+    lastTestStatus: incoming.lastTestStatus,
+    lastTestMessage: incoming.lastTestMessage,
+  });
+  const configured = isValidAppsScriptUrl(saved.appsScriptWebhookUrl) && saved.autoUploadToDrive !== false;
+  res.json({
+    success: true,
+    configured,
+    healthy: configured && saved.lastTestStatus !== 'error',
+    config: saved,
+  });
+});
+
+app.post('/api/drive/apps-script-test', async (req: Request, res: Response) => {
+  const serverCfg = loadServerDriveConfig();
+  const {
+    webhookUrl: clientWebhookUrl = '',
+    folderName = serverCfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo',
+    parentFolderId = '',
+  } = req.body || {};
+  const webhookUrl = String(clientWebhookUrl || serverCfg.appsScriptWebhookUrl || '').trim();
+
+  try {
+    if (!webhookUrl || !isValidAppsScriptUrl(webhookUrl)) {
+      res.status(400).json({
+        success: false,
+        message: 'URL Web App Google Apps Script harus berawalan https://script.google.com/...',
+      });
+      return;
+    }
+
+    const parsed = await callAppsScriptWebApp(webhookUrl, {
+      action: 'ping',
+      folderName: String(folderName || 'SIMPEL MI Al Ihsan Soborejo'),
+      parentFolderId: String(parentFolderId || ''),
+    });
+
+    const detectedOwner = String(parsed?.ownerEmail || serverCfg.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL).trim();
+
+    saveServerDriveConfig({
+      appsScriptWebhookUrl: webhookUrl,
+      driveFolderName: String(folderName || 'SIMPEL MI Al Ihsan Soborejo'),
+      sharedFolderUrl: parsed?.folderUrl || serverCfg.sharedFolderUrl,
+      ownerEmail: detectedOwner,
+      autoUploadToDrive: true,
+      lastTestAt: new Date().toISOString(),
+      lastTestStatus: 'connected',
+      lastTestMessage:
+        parsed?.message ||
+        `Koneksi Google Apps Script aktif (${detectedOwner})! Folder "${parsed?.folderName || folderName}" siap.`,
+    });
+
+    res.json({
+      success: true,
+      message:
+        parsed?.message ||
+        `Koneksi Google Apps Script aktif (${detectedOwner})! Folder "${parsed?.folderName || folderName}" siap menerima arsip dokumen tanpa login.`,
+      folderUrl: parsed?.folderUrl || '',
+      folderName: parsed?.folderName || folderName,
+      ownerEmail: detectedOwner,
+    });
+  } catch (err: any) {
+    const errMsg = err?.message || 'Gagal menguji koneksi Google Apps Script.';
+    if (isValidAppsScriptUrl(webhookUrl)) {
+      saveServerDriveConfig({
+        appsScriptWebhookUrl: webhookUrl,
+        driveFolderName: String(folderName || serverCfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo'),
+        lastTestAt: new Date().toISOString(),
+        lastTestStatus: 'error',
+        lastTestMessage: errMsg,
+      });
+    }
+    res.status(400).json({
+      success: false,
+      message: errMsg,
+    });
+  }
+});
+
+app.post('/api/drive/apps-script-upload', async (req: Request, res: Response) => {
+  try {
+    const serverCfg = loadServerDriveConfig();
+    const {
+      webhookUrl: clientWebhookUrl = '',
+      filename = '',
+      mimeType = 'application/octet-stream',
+      fileBase64 = '',
+      folderName = serverCfg.driveFolderName || 'SIMPEL MI Al Ihsan Soborejo',
+      categoryFolder = '',
+      folderPath = [],
+      parentFolderId = '',
+      description = '',
+      uploadedBy = '',
+    } = req.body || {};
+
+    const webhookUrl = String(clientWebhookUrl || serverCfg.appsScriptWebhookUrl || '').trim();
+    if (!webhookUrl || !isValidAppsScriptUrl(webhookUrl)) {
+      res.status(400).json({
+        success: false,
+        message: 'URL Web App Google Apps Script belum terkonfigurasi atau tidak valid.',
+      });
+      return;
+    }
+
+    if (!filename || !fileBase64) {
+      res.status(400).json({
+        success: false,
+        message: 'Nama berkas dan konten base64 wajib disertakan.',
+      });
+      return;
+    }
+
+    if (String(fileBase64).length > 42 * 1024 * 1024) {
+      res.status(413).json({
+        success: false,
+        message: 'Ukuran berkas terlalu besar untuk dikirim melalui proxy server (maksimal ~20 MB per berkas).',
+      });
+      return;
+    }
+
+    const sanitizedFolderPath = Array.isArray(folderPath)
+      ? folderPath.map((seg) => String(seg || '').trim()).filter(Boolean)
+      : [];
+
+    const parsed = await callAppsScriptWebApp(webhookUrl, {
+      action: 'upload',
+      filename: String(filename),
+      mimeType: String(mimeType || 'application/octet-stream'),
+      fileBase64: String(fileBase64),
+      folderName: String(folderName || 'SIMPEL MI Al Ihsan Soborejo'),
+      categoryFolder: String(categoryFolder || ''),
+      folderPath: sanitizedFolderPath,
+      parentFolderId: String(parentFolderId || ''),
+      description: String(description || ''),
+      uploadedBy: String(uploadedBy || ''),
+    });
+
+    if (serverCfg.lastTestStatus !== 'connected') {
+      saveServerDriveConfig({
+        appsScriptWebhookUrl: webhookUrl,
+        ownerEmail: parsed?.ownerEmail || serverCfg.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
+        lastTestAt: new Date().toISOString(),
+        lastTestStatus: 'connected',
+        lastTestMessage: 'Upload otomatis ke Google Drive berhasil tanpa login.',
+      });
+    }
+
+    res.json({
+      success: true,
+      id: parsed?.id || parsed?.fileId || '',
+      url: parsed?.url || parsed?.webViewLink || parsed?.link || '',
+      webViewLink: parsed?.webViewLink || parsed?.url || parsed?.link || '',
+      name: parsed?.name || filename,
+      folderUrl: parsed?.folderUrl || '',
+      folderPath: parsed?.folderPath || sanitizedFolderPath.join(' / '),
+      ownerEmail: parsed?.ownerEmail || serverCfg.ownerEmail || DEFAULT_DRIVE_OWNER_EMAIL,
+    });
+  } catch (err: any) {
+    const errMsg = err?.message || 'Gagal mengunggah berkas ke Google Drive via Apps Script.';
+    console.error('[Apps Script Upload] Error:', errMsg);
+    const serverCfg = loadServerDriveConfig();
+    if (isValidAppsScriptUrl(serverCfg.appsScriptWebhookUrl)) {
+      saveServerDriveConfig({
+        lastTestAt: new Date().toISOString(),
+        lastTestStatus: 'error',
+        lastTestMessage: errMsg,
+      });
+    }
+    res.status(502).json({
+      success: false,
+      message: errMsg,
+    });
+  }
+});
+
+app.use('/api', (_req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    message: 'Endpoint API tidak ditemukan.',
+  });
+});
+
+app.use('/api', (err: any, _req: Request, res: Response, _next: NextFunction) => {
+  if (res.headersSent) return;
+  const status = Number(err?.status || err?.statusCode) || (err?.type === 'entity.too.large' ? 413 : 500);
+  const message =
+    err?.type === 'entity.too.large' || status === 413
+      ? 'Ukuran berkas terlalu besar untuk dikirim melalui proxy server (maksimal ~20 MB per berkas).'
+      : err instanceof SyntaxError && 'body' in err
+      ? 'Format data permintaan JSON ke server tidak valid.'
+      : err?.message || 'Terjadi kesalahan internal pada server API.';
+  res.status(status).json({
+    success: false,
+    message,
+  });
+});
+
+// ==========================================
+// VITE DEV SERVER / PRODUCTION STATIC + WEBSOCKET SYNC
+// ==========================================
+async function startServer() {
+  const httpServer = http.createServer(app);
+  const isProd = process.env.NODE_ENV === 'production';
+
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: '/ws/sync',
+    maxPayload: 25 * 1024 * 1024,
+  });
+
+  wss.on('connection', (ws, req) => {
+    const reqUrl = new URL(req.url || '/ws/sync', `http://localhost:${PORT}`);
+    const clientId = reqUrl.searchParams.get('clientId') || `ws-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+    wsClients.set(ws, { clientId, connectedAt: Date.now() });
+
+    // Kirim state otoritatif awal secara instan saat koneksi terbuka (batasi entri >100KB agar frame WS tidak diputus proxy)
+    const wsInitEntries: Record<string, SyncEntry> = {};
+    const wsDeferredKeys: string[] = [];
+    for (const [key, entry] of Object.entries(syncState.entries)) {
+      if (entry.value && entry.value.length > FAST_ENTRY_MAX_BYTES) {
+        wsDeferredKeys.push(key);
+      } else {
+        wsInitEntries[key] = entry;
+      }
+    }
+    ws.send(
+      JSON.stringify({
+        type: 'sync:init',
+        revision: syncState.revision,
+        entries: wsInitEntries,
+        deferredKeys: wsDeferredKeys,
+        fileRevision: syncFilesState.revision,
+        activeClients: getActiveClientCount(),
+        serverTime: new Date().toISOString(),
+      })
+    );
+    broadcastPresence();
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (!msg || !msg.type) return;
+
+        if (msg.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong', serverTime: new Date().toISOString() }));
+          return;
+        }
+
+        if (msg.type === 'sync:pull') {
+          const since = Number(msg.since || 0);
+          const pullEntries: Record<string, SyncEntry> = {};
+          const pullDeferredKeys: string[] = [];
+          for (const [key, entry] of Object.entries(syncState.entries)) {
+            if (since <= 0 || entry.revision > since) {
+              if (entry.value && entry.value.length > FAST_ENTRY_MAX_BYTES) {
+                pullDeferredKeys.push(key);
+              } else {
+                pullEntries[key] = entry;
+              }
+            }
+          }
+          ws.send(
+            JSON.stringify({
+              type: 'sync:state',
+              revision: syncState.revision,
+              entries: pullEntries,
+              deferredKeys: pullDeferredKeys,
+              activeClients: getActiveClientCount(),
+            })
+          );
+          return;
+        }
+
+        if (msg.type === 'sync:patch' && Array.isArray(msg.mutations)) {
+          const senderId = String(msg.clientId || clientId);
+          const result = applySyncMutations(senderId, msg.mutations);
+          ws.send(
+            JSON.stringify({
+              type: 'sync:ack',
+              batchId: msg.batchId || null,
+              revision: result.revision,
+              keys: result.appliedKeys,
+            })
+          );
+        }
+      } catch (err) {
+        console.warn('[Sync WS] Invalid message:', err);
+      }
+    });
+
+    ws.on('close', () => {
+      wsClients.delete(ws);
+      broadcastPresence();
+    });
+
+    ws.on('error', () => {
+      wsClients.delete(ws);
+      broadcastPresence();
+    });
+  });
+
+  if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true, hmr: false },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+    console.log('[AI Studio] Vite dev server mounted inside Express.');
+  } else {
+    const distPath = path.resolve(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.resolve(distPath, 'index.html'));
+    });
+    console.log('[AI Studio] Production static server mounted for dist.');
+  }
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`[AI Studio] Server SIMPEL MI AL IHSAN running on http://0.0.0.0:${PORT} (WebSocket /ws/sync active)`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error('[AI Studio] Fatal error starting server:', err);
+  process.exit(1);
+});
